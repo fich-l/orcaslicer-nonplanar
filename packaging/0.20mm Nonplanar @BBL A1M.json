@@ -1,0 +1,15 @@
+{
+    "type": "process",
+    "name": "0.20mm Nonplanar @BBL A1M",
+    "inherits": "0.20mm Standard @BBL A1M",
+    "from": "User",
+    "is_custom_defined": "0",
+    "version": "2.4.2.0",
+    "compatible_printers": ["Bambu Lab A1 mini 0.4 nozzle"],
+    "top_shell_layers": "3",
+    "reduce_crossing_wall": "1",
+    "use_nonplanar_layers": "1",
+    "nonplanar_layers_angle": "12",
+    "nonplanar_layers_height": "5",
+    "timelapse_enabled": "0"
+}
