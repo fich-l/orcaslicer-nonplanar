@@ -186,6 +186,18 @@ jobs:
             dist/*.sha256
           retention-days: 30
 
+      # Debug symbols, to read crash dumps (not part of the ZIP).
+      - name: Upload debug symbols
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ZIP_NAME }}-pdb
+          path: |
+            orca/${{ matrix.build_dir }}/src/Release/*.pdb
+            orca/${{ matrix.build_dir }}/src/Release/*.dll
+            orca/${{ matrix.build_dir }}/src/Release/*.exe
+          if-no-files-found: warn
+          retention-days: 30
+
       - name: Nonplanar C++ tests (x64)
         if: ${{ matrix.arch == 'x64' }}
         working-directory: orca/${{ matrix.build_dir }}
