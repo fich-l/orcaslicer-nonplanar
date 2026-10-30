@@ -5641,10 +5641,10 @@ index a91d2560..eb0b1236 100644
  	test_printobject.cpp
 diff --git a/tests/fff_print/test_nonplanar.cpp b/tests/fff_print/test_nonplanar.cpp
 new file mode 100644
-index 00000000..94f66c3f
+index 00000000..cbad88f6
 --- /dev/null
 +++ b/tests/fff_print/test_nonplanar.cpp
-@@ -0,0 +1,552 @@
+@@ -0,0 +1,562 @@
 +// Nonplanar layers: shell provenance, repeat slicing and deposition order.
 +// Ported from the PrusaSlicer nonplanar fork.  Meshes are read from
 +// NONPLANAR_FIXTURES_DIR (tests/prusaslicer-nonplanar in the project using
@@ -5847,15 +5847,25 @@ index 00000000..94f66c3f
 +    return runs;
 +}
 +
++// Sets NONPLANAR_DEPOSITION_ORDER, or removes it for nullptr.
++void set_deposition_order_env(const char *value)
++{
++#ifdef _WIN32
++    _putenv_s("NONPLANAR_DEPOSITION_ORDER", value ? value : "");
++#else
++    if (value)
++        setenv("NONPLANAR_DEPOSITION_ORDER", value, 1);
++    else
++        unsetenv("NONPLANAR_DEPOSITION_ORDER");
++#endif
++}
++
 +// Slice with or without the deposition order (NONPLANAR_DEPOSITION_ORDER=0).
 +std::string slice_planned(const std::string &name, bool plan)
 +{
-+    if (plan)
-+        unsetenv("NONPLANAR_DEPOSITION_ORDER");
-+    else
-+        setenv("NONPLANAR_DEPOSITION_ORDER", "0", 1);
++    set_deposition_order_env(plan ? nullptr : "0");
 +    std::string gcode = slice_mesh(load_mesh(name), a1_mini_config());
-+    unsetenv("NONPLANAR_DEPOSITION_ORDER");
++    set_deposition_order_env(nullptr);
 +    return gcode;
 +}
 +

@@ -163,6 +163,7 @@ jobs:
           }
 
       - name: Package portable ZIP
+        id: zip
         run: |
           $name = "OrcaSlicer-Nonplanar-v$env:NP_VERSION-Windows-${{ matrix.arch }}"
           $stage = "dist\OrcaSlicer Nonplanar"
@@ -202,7 +203,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Slice the test models (x64)
-        if: ${{ matrix.arch == 'x64' }}
+        # Runs even if the C++ tests fail.
+        if: ${{ matrix.arch == 'x64' && !cancelled() && steps.zip.outcome == 'success' }}
         run: |
           $exe = Get-ChildItem -Recurse "dist\OrcaSlicer Nonplanar" -Include orca-slicer.exe,OrcaSlicer.exe | Select-Object -First 1
           $p = "np\tests\orcaslicer-nonplanar\profiles"
@@ -221,7 +223,7 @@ jobs:
           }
 
       - name: Upload test G-code (x64)
-        if: ${{ matrix.arch == 'x64' }}
+        if: ${{ matrix.arch == 'x64' && !cancelled() && steps.zip.outcome == 'success' }}
         uses: actions/upload-artifact@v4
         with:
           name: test-gcode-windows-x64
