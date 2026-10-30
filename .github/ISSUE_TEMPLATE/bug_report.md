@@ -12,10 +12,10 @@ labels: bug
 **Printer, nozzle, filament**
 
 **Settings changed from the defaults**
-<!-- e.g. Maximum nonplanar angle 10°, fuzzy skin on top surfaces -->
+<!-- e.g. Maximum nonplanar angle 10°, nonplanar top surface direction 45° -->
 
 **Project or model**
 <!-- Attach the 3MF (File > Export > Export project as 3MF) or the model file. -->
 
 **Version**
-<!-- The line "; OrcaSlicer Nonplanar v0.1 ..." from the G-code header, and your macOS version. -->
+<!-- The line "; OrcaSlicer Nonplanar v0.1 ..." from the G-code header, and your macOS or Windows version. -->

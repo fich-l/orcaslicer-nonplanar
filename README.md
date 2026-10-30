@@ -1,7 +1,8 @@
 # OrcaSlicer Nonplanar v0.1
 
 > [!IMPORTANT]
-> **macOS on Apple Silicon only (M1 or newer).** v0.1 doesn't run on Intel Macs, Windows or Linux.
+> **Runs on macOS with Apple Silicon (M1 or newer) and on Windows 10/11 (x64 and ARM64).**
+> v0.1 doesn't run on Intel Macs or Linux.
 
 **Test release.** OrcaSlicer 2.4.2 with **nonplanar top surfaces**: the last shells of gently sloped tops
 (up to 12°) follow the surface instead of being printed as stair steps. Every nonplanar move is checked against
@@ -70,14 +71,22 @@ Both work on any printer.
 
 ## Install
 
-1. Download `OrcaSlicer-Nonplanar-v0.1-macOS-arm64.dmg` from
-   [Releases](https://github.com/fich-l/orcaslicer-nonplanar/releases).
-2. Open the DMG and drag **OrcaSlicer Nonplanar** into **Applications**.
-3. Allow the app once in the macOS security settings (see below).
+Download the file for your system from [Releases](https://github.com/fich-l/orcaslicer-nonplanar/releases):
+
+| System | File |
+|---|---|
+| macOS, Apple Silicon | `OrcaSlicer-Nonplanar-v0.1-macOS-arm64.dmg` |
+| Windows, normal PCs (Intel/AMD) | `OrcaSlicer-Nonplanar-v0.1-Windows-x64.zip` |
+| Windows on ARM (Snapdragon laptops, Windows VMs on Apple Silicon Macs) | `OrcaSlicer-Nonplanar-v0.1-Windows-arm64.zip` |
+
+### macOS
+
+1. Open the DMG and drag **OrcaSlicer Nonplanar** into **Applications**.
+2. Allow the app once in the macOS security settings (see below).
 
 > [!WARNING]
-> **Required security setting on first start.** The app is not signed with an Apple Developer ID, so macOS blocks
-> it the first time ("cannot be opened" / "could not verify"). Allow it once with one of these:
+> **Required security setting on first start (macOS).** The app is not signed with an Apple Developer ID, so macOS
+> blocks it the first time ("cannot be opened" / "could not verify"). Allow it once with one of these:
 > - **macOS 15 and newer:** start the app once and close the warning. Then open
 >   **System Settings > Privacy & Security**, scroll down and click **Open Anyway** next to
 >   "OrcaSlicer Nonplanar", and confirm.
@@ -91,13 +100,25 @@ Both work on any printer.
 
 Requirements: Apple Silicon Mac (M1 or newer), macOS 11.3 or newer.
 
+### Windows
+
+1. Unzip the ZIP anywhere, for example into your *Documents* folder. There's no installer.
+2. Start **`orca-slicer.exe`** in the folder *OrcaSlicer Nonplanar*.
+
+> [!WARNING]
+> **Required security step on first start (Windows).** The app is not signed, so Windows SmartScreen shows
+> **"Windows protected your PC"**. Click **More info**, then **Run anyway**. After that, the app opens normally.
+
+Requirements: Windows 10 or 11, 64-bit (x64 or ARM64).
+
 ## First start
 
-- The app has **its own settings folder** (`~/Library/Application Support/OrcaSlicerNonplanar`). A normal
-  OrcaSlicer on the same Mac is not touched, and both can run side by side.
+- The app has **its own settings folder**: `~/Library/Application Support/OrcaSlicerNonplanar` on macOS,
+  `%APPDATA%\OrcaSlicerNonplanar` on Windows. An installed OrcaSlicer is not touched: its settings, file
+  associations and `orcaslicer://` links stay as they are, and both can run side by side.
 - Orca's setup wizard asks for your printers and filaments, as in normal OrcaSlicer.
 - **Nonplanar is on by default** (12°, 5 mm) for every printer and process preset.
-- **Bambu Lab A1 mini:** the DMG contains the preset `0.20mm Nonplanar @BBL A1M.json` (3 top shells, avoid
+- **Bambu Lab A1 mini:** the download contains the preset `0.20mm Nonplanar @BBL A1M.json` (3 top shells, avoid
   crossing walls). Import it with *File > Import > Import Configs*.
 
 ## Usage
@@ -120,18 +141,12 @@ Please open an [issue](https://github.com/fich-l/orcaslicer-nonplanar/issues) wi
 - the exact error message, or a screenshot of the preview;
 - the version line from the G-code header (`; OrcaSlicer Nonplanar v0.1 …`).
 
-## Help wanted: Windows port
-
-> [!TIP]
-> **Looking for people who'd like to port this to Windows.** The whole change is one patch on OrcaSlicer 2.4.2
-> (see [`BUILD.md`](BUILD.md)). If you know how to build OrcaSlicer on Windows and want to help, please get in
-> touch through an [issue](https://github.com/fich-l/orcaslicer-nonplanar/issues) or on Reddit.
-
 ## Source and license
 
 OrcaSlicer is licensed under the **GNU AGPL-3.0**; so is this modification (see `LICENSE`).
 The complete source is OrcaSlicer v2.4.2 (commit `8500fcdccaa10b5099ac20d252af3a7c560046f1`) plus
-[`orca-nonplanar.patch`](orca-nonplanar.patch). How to build it is in [`BUILD.md`](BUILD.md).
+[`orca-nonplanar.patch`](orca-nonplanar.patch). How to build it is in [`BUILD.md`](BUILD.md); the Windows
+downloads are built by [this workflow](.github/workflows/build-windows.yml).
 
 ## Credits
 
