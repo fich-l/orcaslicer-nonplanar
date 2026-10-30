@@ -2464,7 +2464,7 @@ index 00000000..c38d5add
 \ No newline at end of file
 diff --git a/src/libslic3r/NonplanarSchedule.cpp b/src/libslic3r/NonplanarSchedule.cpp
 new file mode 100644
-index 00000000..79360391
+index 00000000..51cf2535
 --- /dev/null
 +++ b/src/libslic3r/NonplanarSchedule.cpp
 @@ -0,0 +1,1219 @@
@@ -2500,16 +2500,16 @@ index 00000000..79360391
 +    const auto it = layers[layer_id].find(source_path_id);
 +    if (it == layers[layer_id].end())
 +        return nullptr;
-+    auto near = [](const Point &a, const Point &b) { return (a - b).cast<double>().norm() <= 2.; };
++    auto close_to = [](const Point &a, const Point &b) { return (a - b).cast<double>().norm() <= 2.; };
 +    const Points &pts = polyline.points;
 +    for (const PathPlan &plan : it->second) {
-+        if (near(plan.first, pts.front()) && near(plan.second, pts[1]) &&
-+            near(plan.last, pts.back()) && near(plan.before_last, pts[pts.size() - 2])) {
++        if (close_to(plan.first, pts.front()) && close_to(plan.second, pts[1]) &&
++            close_to(plan.last, pts.back()) && close_to(plan.before_last, pts[pts.size() - 2])) {
 +            reversed = false;
 +            return &plan;
 +        }
-+        if (near(plan.first, pts.back()) && near(plan.second, pts[pts.size() - 2]) &&
-+            near(plan.last, pts.front()) && near(plan.before_last, pts[1])) {
++        if (close_to(plan.first, pts.back()) && close_to(plan.second, pts[pts.size() - 2]) &&
++            close_to(plan.last, pts.front()) && close_to(plan.before_last, pts[1])) {
 +            reversed = true;
 +            return &plan;
 +        }

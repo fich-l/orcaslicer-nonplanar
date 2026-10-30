@@ -73,9 +73,9 @@ jobs:
           "NP_VERSION=$v" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
           "Version $v"
 
-      - name: Cache dependencies
+      - name: Restore cached dependencies
         id: deps
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: orca/deps/${{ matrix.dep_dir }}
           key: windows-${{ matrix.arch }}-orca-deps-${{ env.ORCA_COMMIT }}-${{ hashFiles('orca/deps/**') }}
@@ -86,10 +86,10 @@ jobs:
         with:
           cmakeVersion: "~4.3.0"
 
-      - name: CMake 3.31 (Windows ARM64, as in OrcaSlicer's CI)
+      - name: CMake (Windows ARM64; needs 4.2+ for Visual Studio 2026)
         if: ${{ matrix.arch == 'arm64' }}
         run: |
-          $ver = "3.31.6"
+          $ver = "4.3.6"
           $url = "https://github.com/Kitware/CMake/releases/download/v$ver/cmake-$ver-windows-arm64.zip"
           Invoke-WebRequest -Uri $url -OutFile "$env:RUNNER_TEMP\cmake.zip"
           Expand-Archive -Path "$env:RUNNER_TEMP\cmake.zip" -DestinationPath "$env:RUNNER_TEMP\cmake" -Force
@@ -141,6 +141,16 @@ jobs:
           choco install strawberryperl -y --no-progress
           .\build_release_vs.bat deps ${{ matrix.bat_arch }}
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # The batch file doesn't always pass errors on, so check the result.
+          if (-not (Test-Path "deps/${{ matrix.dep_dir }}/usr/local/include")) { throw "Dependencies were not built" }
+
+      # Saved right away, so a failing slicer build doesn't lose hours of dependency builds.
+      - name: Save dependencies
+        if: ${{ steps.deps.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: orca/deps/${{ matrix.dep_dir }}
+          key: ${{ steps.deps.outputs.cache-primary-key }}
 
       - name: Build OrcaSlicer Nonplanar
         working-directory: orca
