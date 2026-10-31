@@ -174,7 +174,7 @@ jobs:
           (Get-Content "np\packaging\README-Windows.txt" -Raw).Replace('@VERSION@', $env:NP_VERSION) |
             Set-Content -Encoding utf8 "$stage\README.txt"
           Compress-Archive -Path $stage -DestinationPath "dist\$name.zip" -CompressionLevel Optimal
-          (Get-FileHash "dist\$name.zip" -Algorithm SHA256).Hash.ToLower() + "  $name.zip" | Set-Content -Encoding ascii "dist\$name.sha256"
+          [IO.File]::WriteAllText("$PWD\dist\$name.sha256", (Get-FileHash "dist\$name.zip" -Algorithm SHA256).Hash.ToLower() + "  $name.zip`n")
           "ZIP_NAME=$name" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
 
       - name: Upload ZIP
