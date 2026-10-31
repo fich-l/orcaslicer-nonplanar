@@ -18,4 +18,4 @@ labels: bug
 <!-- Attach the 3MF (File > Export > Export project as 3MF) or the model file. -->
 
 **Version**
-<!-- The line "; OrcaSlicer Nonplanar v0.1 ..." from the G-code header, and your macOS or Windows version. -->
+<!-- The line "; OrcaSlicer Nonplanar v0.1 ..." from the G-code header, and your macOS version and Mac model. -->

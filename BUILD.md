@@ -35,24 +35,6 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild -project Orc
 
 The app is at `build/arm64/src/Release/OrcaSlicer.app`.
 
-## Windows (x64 or ARM64)
-
-The release ZIPs are built by [`.github/workflows/build-windows.yml`](.github/workflows/build-windows.yml) on
-GitHub's Windows runners; it's the reference for all steps. By hand, with Visual Studio 2022 (C++ workload),
-CMake, Git and Strawberry Perl, in a path without spaces:
-
-```bat
-git clone https://github.com/OrcaSlicer/OrcaSlicer.git orca
-cd orca
-git checkout 8500fcdccaa10b5099ac20d252af3a7c560046f1
-git apply path\to\orca-nonplanar.patch
-build_release_vs.bat deps
-build_release_vs.bat slicer
-```
-
-For ARM64, add `arm64` to both commands. ARM64 also needs GMP/MPFR from MSYS2 (see the workflow). The portable
-app is in `build\OrcaSlicer` (`build-arm64\OrcaSlicer` for ARM64).
-
 ## Tests
 
 The nonplanar C++ tests are in `tests/fff_print/test_nonplanar.cpp` (tag `[Nonplanar]`). Build the
