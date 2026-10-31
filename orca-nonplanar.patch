@@ -194,103 +194,6 @@ index 180312aa..07baa04e 100644
          this->overhang_degree = rhs.overhang_degree;
          this->curve_degree = rhs.curve_degree;
          this->polyline = std::move(rhs.polyline);
-diff --git a/src/libslic3r/Feature/FuzzySkin/FuzzySkin.cpp b/src/libslic3r/Feature/FuzzySkin/FuzzySkin.cpp
-index 11e2d081..b8e9cce2 100644
---- a/src/libslic3r/Feature/FuzzySkin/FuzzySkin.cpp
-+++ b/src/libslic3r/Feature/FuzzySkin/FuzzySkin.cpp
-@@ -473,6 +473,76 @@ void group_region_by_fuzzify(PerimeterGenerator& g)
-     }
- }
- 
-+void fuzzy_top_surface_heights(Points3& pts, const PrintRegionConfig& config, const int layer_id, const coordf_t slice_z)
-+{
-+    if (!config.fuzzy_skin_top_surface || pts.size() < 2 || (layer_id <= 0 && !config.fuzzy_skin_first_layer))
-+        return;
-+    FuzzySkinConfig cfg{FuzzySkinType::All,
-+                        scaled<coord_t>(config.fuzzy_skin_thickness.value),
-+                        scaled<coord_t>(config.fuzzy_skin_point_distance.value),
-+                        config.fuzzy_skin_first_layer,
-+                        config.fuzzy_skin_noise_type,
-+                        config.fuzzy_skin_scale,
-+                        config.fuzzy_skin_octaves,
-+                        config.fuzzy_skin_persistence,
-+                        FuzzySkinMode::Displacement,
-+                        config.fuzzy_skin_ripples_per_layer,
-+                        config.fuzzy_skin_ripple_offset,
-+                        config.fuzzy_skin_layers_between_ripple_offset,
-+                        layer_id};
-+    // Ripples follow a wall loop; on a top line the classic random noise is used instead.
-+    if (cfg.noise_type == NoiseType::Ripple)
-+        cfg.noise_type = NoiseType::Classic;
-+    std::unique_ptr<noise::module::Module> noise = get_noise_module(cfg);
-+    const double thickness = unscale<double>(cfg.thickness);
-+
-+    // New points along each segment (heights interpolated: a conformal segment lies on one facet). The original
-+    // points keep their height. New points stay >= 0.1 mm apart and from the original points, and segments shorter
-+    // than that or steeper than 11 deg get none, so the 0.001-mm G-code rounding cannot break the 12-deg check.
-+    const double max_gradient = std::tan(11. * M_PI / 180.);
-+    const double min_gap  = scaled<double>(0.1);
-+    const double min_dist = std::max(min_gap, cfg.point_distance * 3. / 4.);
-+    const double range    = cfg.point_distance / 2.;
-+    Points3             dense{pts.front()};
-+    std::vector<double> off{0.};
-+    double              left_over = random_value() * (min_dist / 2.);
-+    for (size_t i = 1; i < pts.size(); ++i) {
-+        const Vec3d  a = pts[i - 1].cast<double>(), b = pts[i].cast<double>();
-+        const double len = (b - a).head<2>().norm();
-+        double       d   = std::max(left_over, min_gap);
-+        if (len < 2. * min_gap || std::abs(b.z() - a.z()) > max_gradient * len)
-+            d = len;
-+        for (; d < len - min_gap; d += min_dist + random_value() * range) {
-+            const Vec3d q = a + (b - a) * (d / len);
-+            dense.emplace_back(Point3(q.cast<coord_t>()));
-+            const double v = std::clamp(noise->GetValue(unscale_(q.x()), unscale_(q.y()), slice_z), -1., 1.);
-+            off.push_back(0.5 * (v + 1.) * thickness);
-+        }
-+        left_over = std::max(0., d - len);
-+        if (dense.back() != pts[i]) {
-+            dense.push_back(pts[i]);
-+            off.push_back(0.);
-+        }
-+    }
-+    off.back() = 0.;
-+    // Limit the height changes: forward pass bounds the rise, backward pass the fall of every move. The base line
-+    // keeps max(tan(11 deg), its own slope), so the raised offsets stay >= 0 and the ends stay at 0.
-+    const size_t n = dense.size();
-+    std::vector<double> allowed(n - 1), dz(n - 1);
-+    for (size_t i = 0; i + 1 < n; ++i) {
-+        const double dxy = unscale<double>((dense[i + 1] - dense[i]).head<2>().cast<double>().norm());
-+        dz[i]      = unscale<double>(dense[i + 1].z() - dense[i].z());
-+        allowed[i] = std::max(max_gradient * dxy, std::abs(dz[i]));
-+    }
-+    for (size_t i = 1; i < n; ++i)
-+        off[i] = std::min(off[i], off[i - 1] + allowed[i - 1] - dz[i - 1]);
-+    for (size_t i = n - 1; i > 0; --i)
-+        off[i - 1] = std::min(off[i - 1], off[i] + allowed[i - 1] + dz[i - 1]);
-+    for (size_t i = 0; i < n; ++i)
-+        dense[i].z() += coord_t(std::lround(scale_(std::max(0., off[i]))));
-+    pts = std::move(dense);
-+}
-+
- bool should_fuzzify(const FuzzySkinConfig& config, const int layer_id, const size_t loop_idx, const bool is_contour)
- {
-     const auto fuzziy_type = config.type;
-diff --git a/src/libslic3r/Feature/FuzzySkin/FuzzySkin.hpp b/src/libslic3r/Feature/FuzzySkin/FuzzySkin.hpp
-index e099139c..3c60ad27 100644
---- a/src/libslic3r/Feature/FuzzySkin/FuzzySkin.hpp
-+++ b/src/libslic3r/Feature/FuzzySkin/FuzzySkin.hpp
-@@ -18,6 +18,11 @@ bool should_fuzzify(const FuzzySkinConfig& config, int layer_id, size_t loop_idx
- Polygon apply_fuzzy_skin(const Polygon& polygon, const PerimeterGenerator& perimeter_generator, size_t loop_idx, bool is_contour);
- void    apply_fuzzy_skin(Arachne::ExtrusionLine* extrusion, const PerimeterGenerator& perimeter_generator, bool is_contour);
- 
-+// Nonplanar fork: fuzzy skin on top surfaces (fuzzy_skin_top_surface). Jitters the heights of a top surface line
-+// with absolute Z: new points every point distance, each raised by 0..thickness above the surface. The line ends
-+// keep their height and no move gets steeper than max(tan(11.5 deg), its own slope).
-+void    fuzzy_top_surface_heights(Points3& pts, const PrintRegionConfig& config, int layer_id, coordf_t slice_z);
-+
- } // namespace Slic3r::Feature::FuzzySkin
- 
- #endif // libslic3r_FuzzySkin_hpp_
 diff --git a/src/libslic3r/Fill/Fill.cpp b/src/libslic3r/Fill/Fill.cpp
 index e9517480..a2eff09a 100644
 --- a/src/libslic3r/Fill/Fill.cpp
@@ -426,7 +329,7 @@ index e9517480..a2eff09a 100644
      }
  
 diff --git a/src/libslic3r/GCode.cpp b/src/libslic3r/GCode.cpp
-index b9a81c54..dc547f58 100644
+index b9a81c54..3372459a 100644
 --- a/src/libslic3r/GCode.cpp
 +++ b/src/libslic3r/GCode.cpp
 @@ -6,6 +6,7 @@
@@ -1198,7 +1101,7 @@ index b9a81c54..dc547f58 100644
      if (!m_small_area_infill_flow_compensator || !m_config.small_area_infill_flow_compensation.value)
          return false;
  
-@@ -6344,11 +6928,86 @@ double GCode::calc_max_volumetric_speed(const double layer_height, const double
+@@ -6344,11 +6928,71 @@ double GCode::calc_max_volumetric_speed(const double layer_height, const double
  
  std::string GCode::_extrude(const ExtrusionPath &path, std::string description, double speed)
  {
@@ -1206,28 +1109,13 @@ index b9a81c54..dc547f58 100644
 +    // nonplanar top shell: emit a copy with adjusted heights.
 +    // Fixed half/half split (user decision 2026-10-26 after test prints):
 +    // descending lines raised, ascending lines lowered by half the correction each.
-+    // Fuzzy skin on top surfaces (user request 2026-10-29): height jitter of the
-+    // topmost top surface lines, emitted with absolute heights.
-+    const bool topmost = path.role() == erTopSolidInfill &&
-+        (! path.nonplanar_source || (path.distance_to_top >= 0.f && path.distance_to_top < 1e-4f));
-+    const bool fuzzy_top = topmost && m_config.fuzzy_skin_top_surface.value && m_layer != nullptr;
-+    if (! m_slope_compensating && (fuzzy_top || (topmost && path.nonplanar_source))) {
++    const bool topmost_nonplanar = path.role() == erTopSolidInfill && path.nonplanar_source &&
++        path.distance_to_top >= 0.f && path.distance_to_top < 1e-4f;
++    if (! m_slope_compensating && topmost_nonplanar) {
 +        constexpr double downhill_raise = 0.5;
 +        constexpr double uphill_lower   = 0.5;
 +        ExtrusionPath compensated(path);
-+        if (path.nonplanar_source)
-+            compensate_nonplanar_slope(compensated.polyline, downhill_raise, uphill_lower, m_nonplanar_clearance.tip_radius_mm);
-+        if (fuzzy_top) {
-+            if (! path_has_absolute_z(compensated)) {
-+                // Planar top: absolute height of this layer (z offset is added on emission).
-+                const coord_t z = coord_t(std::lround(scale_(m_nominal_z - m_config.z_offset.value)));
-+                for (Point3 &p : compensated.polyline.points)
-+                    p.z() = z + (compensated.z_contoured ? p.z() : 0);
-+                compensated.z_contoured = false;
-+            }
-+            compensated.polyline.fitting_result.clear();
-+            Feature::FuzzySkin::fuzzy_top_surface_heights(compensated.polyline.points, m_config, int(m_layer->id()), m_layer->slice_z);
-+        }
++        compensate_nonplanar_slope(compensated.polyline, downhill_raise, uphill_lower, m_nonplanar_clearance.tip_radius_mm);
 +        m_slope_compensating = true;
 +        std::string out;
 +        try {
@@ -1285,7 +1173,7 @@ index b9a81c54..dc547f58 100644
      const ExtrusionPathSloped* sloped = dynamic_cast<const ExtrusionPathSloped*>(&path);
  
      const auto get_sloped_z = [&sloped, this](double z_ratio) {
-@@ -6365,12 +7024,16 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description,
+@@ -6365,12 +7009,16 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description,
      // path is 2D. But in slope lift case, lift z is done in travel_to function.
      // Add m_need_change_layer_lift_z when change_layer in case of no lift if m_last_pos is equal to path.first_point() by chance
      Point first_point = path.first_point();
@@ -1303,7 +1191,7 @@ index b9a81c54..dc547f58 100644
          } else if (path.z_contoured && !path.polyline.lines().empty()) {
              z = unscale_(path.polyline.lines().begin()->a.z()) + m_nominal_z;
          }
-@@ -6378,7 +7041,7 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description,
+@@ -6378,7 +7026,7 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description,
          gcode += this->travel_to(first_point, path.role(), "move to first " + description + " point", z);
  
          // Orca: ensure Z matches planned layer height
@@ -1312,7 +1200,7 @@ index b9a81c54..dc547f58 100644
              const std::string z_sync_comment = _last_pos_undefined ?
                  "ensure Z matches planned layer height" : ""; // no comment for normal layer-Z lift
              gcode += this->writer().travel_to_z(m_nominal_z, z_sync_comment, true);
-@@ -6393,7 +7056,11 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description,
+@@ -6393,7 +7041,11 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description,
              gcode += m_writer.travel_to_z(first_z, "set Z for contouring", true);
          }
      }
@@ -1325,7 +1213,7 @@ index b9a81c54..dc547f58 100644
          double current_z = m_writer.get_position().z();
          if (GCodeFormatter::quantize_xyzf(current_z) != GCodeFormatter::quantize_xyzf(m_nominal_z)) {
              gcode += this->writer().travel_to_z(m_nominal_z, "reset Z after contouring", true);
-@@ -6471,7 +7138,10 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description,
+@@ -6471,7 +7123,10 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description,
      _mm3_per_mm *= filament_flow_ratio;
  
      if (path.role() == erTopSolidInfill) {
@@ -1337,7 +1225,20 @@ index b9a81c54..dc547f58 100644
      } else if (path.role() == erBottomSurface) {
          _mm3_per_mm *= m_config.bottom_solid_infill_flow_ratio;
      } else if (path.role() == erInternalBridgeInfill) {
-@@ -6654,7 +7324,9 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description,
+@@ -6560,6 +7215,12 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description,
+ 
+     if (speed == 0)
+         speed = filament_max_volumetric_speed / _mm3_per_mm;
++
++    // Nonplanar: top surfaces of an object with nonplanar layers are printed at
++    // most at this speed (smoother nonplanar tops, user decision 2026-10-31).
++    constexpr double nonplanar_max_top_surface_speed = 50.;
++    if (path.role() == erTopSolidInfill && m_config.use_nonplanar_layers.value)
++        speed = std::min(speed, nonplanar_max_top_surface_speed);
+     
+     const auto _layer = layer_id();
+     if (this->on_first_layer() || object_layer_over_raft()) {
+@@ -6654,7 +7315,9 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description,
      bool variable_speed = false;
      std::vector<ProcessedPoint> new_points {};
  
@@ -1348,7 +1249,7 @@ index b9a81c54..dc547f58 100644
          (is_bridge(path.role()) || is_perimeter(path.role()))) {
              bool is_external = is_external_perimeter(path.role());
              double ref_speed   = is_external ? m_config.get_abs_value("outer_wall_speed") : m_config.get_abs_value("inner_wall_speed");
-@@ -6989,7 +7661,21 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description,
+@@ -6989,7 +7652,21 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description,
              }
              // BBS: use G1 if not enable arc fitting or has no arc fitting result or in spiral_mode mode or we are doing sloped extrusion
              // Attention: G2 and G3 is not supported in spiral_mode mode
@@ -1371,7 +1272,7 @@ index b9a81c54..dc547f58 100644
                  double path_length = 0.;
                  double total_length = sloped == nullptr ? 0. : path.polyline.length() * SCALING_FACTOR;
                  double saved_z      = m_writer.get_position().z();
-@@ -7256,6 +7942,19 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description,
+@@ -7256,6 +7933,19 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description,
        m_last_notgapfill_extrusion_role = path.role();
      }
  
@@ -1391,7 +1292,7 @@ index b9a81c54..dc547f58 100644
      this->set_last_pos(path.last_point());
      return gcode;
  }
-@@ -7357,6 +8056,25 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
+@@ -7357,6 +8047,25 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
      // check whether a straight travel move would need retraction
      LiftType lift_type = LiftType::SpiralLift;
      bool needs_retraction = this->needs_retraction(travel, role, lift_type);
@@ -1417,7 +1318,7 @@ index b9a81c54..dc547f58 100644
      // check whether wipe could be disabled without causing visible stringing
      bool could_be_wipe_disabled       = false;
      // Save state of use_external_mp_once for the case that will be needed to call twice m_avoid_crossing_perimeters.travel_to.
-@@ -7415,7 +8133,8 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
+@@ -7415,7 +8124,8 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
  
      // if a retraction would be needed, try to use reduce_crossing_wall to plan a
      // multi-hop travel path inside the configuration space
@@ -1427,7 +1328,7 @@ index b9a81c54..dc547f58 100644
          && !m_avoid_crossing_perimeters.disabled_once()
          && m_writer.is_current_position_clear())
          //BBS: don't generate detour travel paths when current position is unclea
-@@ -7467,7 +8186,26 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
+@@ -7467,7 +8177,26 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
      m_writer.add_object_change_labels(gcode);
  
      // use G1 because we rely on paths being straight (G0 may make round paths)
@@ -1455,7 +1356,7 @@ index b9a81c54..dc547f58 100644
          // Orca: use `travel_to_xyz` to ensure we start at the correct z, in case we moved z in custom/filament change gcode
          if (false/*m_spiral_vase*/) {
              // No lazy z lift for spiral vase mode
-@@ -7505,10 +8243,22 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
+@@ -7505,10 +8234,22 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
          }
          this->set_last_pos(travel.points.back());
      }
@@ -1478,7 +1379,7 @@ index b9a81c54..dc547f58 100644
  //BBS
  LiftType GCode::to_lift_type(ZHopType z_hop_types) {
      switch (z_hop_types)
-@@ -7653,9 +8403,33 @@ std::string GCode::retract(bool toolchange, bool is_last_retraction, LiftType li
+@@ -7653,9 +8394,33 @@ std::string GCode::retract(bool toolchange, bool is_last_retraction, LiftType li
  {
      std::string gcode;
  
@@ -4211,18 +4112,9 @@ index 00000000..ef21d42a
 +
 +#endif
 diff --git a/src/libslic3r/Preset.cpp b/src/libslic3r/Preset.cpp
-index 98549d5f..7ad294af 100644
+index 98549d5f..1b415732 100644
 --- a/src/libslic3r/Preset.cpp
 +++ b/src/libslic3r/Preset.cpp
-@@ -1075,7 +1075,7 @@ static std::vector<std::string> s_Preset_print_options{
-     "support_ironing_flow",
-     "support_ironing_spacing",
-     "max_travel_detour_distance",
--    "fuzzy_skin", "fuzzy_skin_thickness", "fuzzy_skin_point_distance", "fuzzy_skin_first_layer", "fuzzy_skin_noise_type", "fuzzy_skin_mode", "fuzzy_skin_scale", "fuzzy_skin_octaves", "fuzzy_skin_persistence", "fuzzy_skin_ripples_per_layer", "fuzzy_skin_ripple_offset", "fuzzy_skin_layers_between_ripple_offset",
-+    "fuzzy_skin", "fuzzy_skin_top_surface", "fuzzy_skin_thickness", "fuzzy_skin_point_distance", "fuzzy_skin_first_layer", "fuzzy_skin_noise_type", "fuzzy_skin_mode", "fuzzy_skin_scale", "fuzzy_skin_octaves", "fuzzy_skin_persistence", "fuzzy_skin_ripples_per_layer", "fuzzy_skin_ripple_offset", "fuzzy_skin_layers_between_ripple_offset",
-     "max_volumetric_extrusion_rate_slope", "max_volumetric_extrusion_rate_slope_segment_length","extrusion_rate_smoothing_external_perimeter_only",
-     "inner_wall_speed", "outer_wall_speed", "sparse_infill_speed", "internal_solid_infill_speed",
-     "top_surface_speed", "support_speed", "support_object_xy_distance", "support_object_first_layer_gap", "support_interface_speed",
 @@ -1183,7 +1183,7 @@ static std::vector<std::string> s_Preset_print_options{
      "overhang_4_4_speed",
      "initial_layer_infill_speed",
@@ -4293,35 +4185,17 @@ index c69c5b65..830083bf 100644
      std::pair<FillAdaptive::OctreePtr, FillAdaptive::OctreePtr> m_adaptive_fill_octrees;
      FillLightning::GeneratorPtr m_lightning_generator;
 diff --git a/src/libslic3r/PrintConfig.cpp b/src/libslic3r/PrintConfig.cpp
-index 982953af..9d5405e3 100644
+index 982953af..f8e887fa 100644
 --- a/src/libslic3r/PrintConfig.cpp
 +++ b/src/libslic3r/PrintConfig.cpp
-@@ -3558,6 +3558,17 @@ void PrintConfigDef::init_fff_params()
-     def->mode = comSimple;
-     def->set_default_value(new ConfigOptionEnum<FuzzySkinType>(FuzzySkinType::Disabled_fuzzy));
- 
-+    // Nonplanar fork (user request 2026-10-29): fuzzy skin on top surfaces too.
-+    def = this->add("fuzzy_skin_top_surface", coBool);
-+    def->label = L("Fuzzy skin on top surfaces");
-+    def->category = L("Others");
-+    def->tooltip = L("Also jitter the height of the top surface lines (up and down), so that top surfaces get a rough look. "
-+                     "Each point is raised by 0 to the fuzzy skin thickness, a new point every fuzzy skin point distance. "
-+                     "No move gets steeper than 11.5 degrees: a small point distance limits the height. "
-+                     "Works independently of the fuzzy skin wall setting.");
-+    def->mode = comSimple;
-+    def->set_default_value(new ConfigOptionBool(false));
-+
-     def = this->add("fuzzy_skin_thickness", coFloat);
-     def->label = L("Fuzzy skin thickness");
-     def->category = L("Others");
-@@ -4375,6 +4386,74 @@ void PrintConfigDef::init_fff_params()
+@@ -4375,6 +4375,74 @@ void PrintConfigDef::init_fff_params()
      def->mode     = comExpert;
      def->set_default_value(new ConfigOptionFloat(0));
  
 +    def = this->add("use_nonplanar_layers", coBool);
 +    def->label = L("Use nonplanar layers");
 +    def->category = L("Quality");
-+    def->tooltip = L("Generate nonplanar layers on top of the object");
++    def->tooltip = L("Generate nonplanar layers on top of the object. Top surfaces of the object are then printed at 50 mm/s at most.");
 +    def->mode = comAdvanced;
 +    // Nonplanar build: on by default with the A1 mini limits below (user decision 2026-10-23).
 +    def->set_default_value(new ConfigOptionBool(true));
@@ -4389,7 +4263,7 @@ index 982953af..9d5405e3 100644
      def = this->add("zaa_enabled", coBool);
      def->label    = L("Z contouring enabled");
      def->category = L("Quality");
-@@ -5876,6 +5955,13 @@ void PrintConfigDef::init_fff_params()
+@@ -5876,6 +5944,13 @@ void PrintConfigDef::init_fff_params()
      def->set_default_value(new ConfigOptionFloat(0));
      def->mode = comAdvanced;
  
@@ -4404,7 +4278,7 @@ index 982953af..9d5405e3 100644
      def->label = L("Timelapse");
      def->tooltip = L("If smooth or traditional mode is selected, a timelapse video will be generated for each print. "
 diff --git a/src/libslic3r/PrintConfig.hpp b/src/libslic3r/PrintConfig.hpp
-index 0a7b7ba3..d2fa92d7 100644
+index 0a7b7ba3..cbcd58dd 100644
 --- a/src/libslic3r/PrintConfig.hpp
 +++ b/src/libslic3r/PrintConfig.hpp
 @@ -1000,6 +1000,14 @@ PRINT_CONFIG_CLASS_DEFINE(
@@ -4422,15 +4296,7 @@ index 0a7b7ba3..d2fa92d7 100644
      ((ConfigOptionBool,                flush_into_objects))
      // BBS
      ((ConfigOptionBool,                flush_into_infill))
-@@ -1111,6 +1119,7 @@ PRINT_CONFIG_CLASS_DEFINE(
-     ((ConfigOptionBool,                 align_infill_direction_to_model))
-     ((ConfigOptionString,               extra_solid_infills))
-     ((ConfigOptionEnum<FuzzySkinType>,  fuzzy_skin))
-+    ((ConfigOptionBool,                 fuzzy_skin_top_surface))
-     ((ConfigOptionFloat,                fuzzy_skin_thickness))
-     ((ConfigOptionFloat,                fuzzy_skin_point_distance))
-     ((ConfigOptionBool,                 fuzzy_skin_first_layer))
-@@ -1625,6 +1634,7 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
+@@ -1625,6 +1633,7 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
      ((ConfigOptionFloatsNullable,     nozzle_volume))
      ((ConfigOptionPoints,             start_end_points))
      ((ConfigOptionEnum<TimelapseType>,    timelapse_type))
@@ -4439,7 +4305,7 @@ index 0a7b7ba3..d2fa92d7 100644
      // BBS: move from PrintObjectConfig
      ((ConfigOptionBool, independent_support_layer_height))
 diff --git a/src/libslic3r/PrintObject.cpp b/src/libslic3r/PrintObject.cpp
-index 925da0c5..dfcb38f9 100644
+index 925da0c5..e4d9f9e4 100644
 --- a/src/libslic3r/PrintObject.cpp
 +++ b/src/libslic3r/PrintObject.cpp
 @@ -470,6 +470,10 @@ void PrintObject::make_perimeters()
@@ -4551,15 +4417,7 @@ index 925da0c5..dfcb38f9 100644
              steps.emplace_back(posInfill);
          } else if (opt_key == "sparse_infill_pattern"
                     || opt_key == "symmetric_infill_y_axis"
-@@ -1361,6 +1427,7 @@ bool PrintObject::invalidate_state_by_config_options(
-             || opt_key == "outer_wall_filament_id"
-             || opt_key == "inner_wall_filament_id"
-             || opt_key == "fuzzy_skin"
-+            || opt_key == "fuzzy_skin_top_surface"
-             || opt_key == "fuzzy_skin_thickness"
-             || opt_key == "fuzzy_skin_point_distance"
-             || opt_key == "fuzzy_skin_first_layer"
-@@ -1387,6 +1454,11 @@ bool PrintObject::invalidate_state_by_config_options(
+@@ -1387,6 +1453,11 @@ bool PrintObject::invalidate_state_by_config_options(
              	steps.emplace_back(posInfill);
  	            steps.emplace_back(posSupportMaterial);
  	        }
@@ -4571,7 +4429,7 @@ index 925da0c5..dfcb38f9 100644
          } else if (
                  opt_key == "wall_generator"
              || opt_key == "wall_transition_length"
-@@ -1433,6 +1505,8 @@ bool PrintObject::invalidate_state_by_config_options(
+@@ -1433,6 +1504,8 @@ bool PrintObject::invalidate_state_by_config_options(
              || opt_key == "print_flow_ratio"
              || opt_key == "first_layer_flow_ratio"
              || opt_key == "top_solid_infill_flow_ratio"
@@ -4580,7 +4438,7 @@ index 925da0c5..dfcb38f9 100644
              || opt_key == "bottom_solid_infill_flow_ratio"
              || opt_key == "outer_wall_flow_ratio"
              || opt_key == "inner_wall_flow_ratio"
-@@ -1473,15 +1547,17 @@ bool PrintObject::invalidate_step(PrintObjectStep step)
+@@ -1473,15 +1546,17 @@ bool PrintObject::invalidate_step(PrintObjectStep step)
  
      // propagate to dependent steps
      if (step == posPerimeters) {
@@ -4602,7 +4460,7 @@ index 925da0c5..dfcb38f9 100644
          invalidated |= m_print->invalidate_steps({ psSkirtBrim });
          m_slicing_params.valid = false;
      } else if (step == posSupportMaterial) {
-@@ -1582,6 +1658,23 @@ void PrintObject::detect_surfaces_type()
+@@ -1582,6 +1657,23 @@ void PrintObject::detect_surfaces_type()
                          layerm_slices_surfaces = union_ex(layerm_slices_surfaces, to_expolygons(layerm->fill_surfaces.surfaces));
                      }
  
@@ -4626,7 +4484,7 @@ index 925da0c5..dfcb38f9 100644
                      // find top surfaces (difference between current surfaces
                      // of current layer and upper one)
                      Surfaces top;
-@@ -1589,7 +1682,13 @@ void PrintObject::detect_surfaces_type()
+@@ -1589,7 +1681,13 @@ void PrintObject::detect_surfaces_type()
                          ExPolygons upper_slices = interface_shells ?
                              diff_ex(layerm_slices_surfaces, upper_layer->m_regions[region_id]->slices.surfaces, ApplySafetyOffset::Yes) :
                              diff_ex(layerm_slices_surfaces, upper_layer->lslices, ApplySafetyOffset::Yes);
@@ -4641,7 +4499,7 @@ index 925da0c5..dfcb38f9 100644
                      } else {
                          // if no upper layer, all surfaces of this one are solid
                          // we clone surfaces because we're going to clear the slices collection
-@@ -1614,7 +1713,10 @@ void PrintObject::detect_surfaces_type()
+@@ -1614,7 +1712,10 @@ void PrintObject::detect_surfaces_type()
                          surfaces_append(
                              bottom,
                              opening_ex(
@@ -4653,7 +4511,7 @@ index 925da0c5..dfcb38f9 100644
                                  offset),
                              surface_type_bottom_other);
                          // if user requested internal shells, we need to identify surfaces
-@@ -1626,8 +1728,11 @@ void PrintObject::detect_surfaces_type()
+@@ -1626,8 +1727,11 @@ void PrintObject::detect_surfaces_type()
                                  bottom,
                                  opening_ex(
                                      diff_ex(
@@ -4667,7 +4525,7 @@ index 925da0c5..dfcb38f9 100644
                                          ApplySafetyOffset::Yes),
                                      offset),
                                  stBottom);
-@@ -1701,11 +1806,13 @@ void PrintObject::detect_surfaces_type()
+@@ -1701,11 +1805,13 @@ void PrintObject::detect_surfaces_type()
                      {
                          Polygons topbottom = to_polygons(top);
                          polygons_append(topbottom, to_polygons(bottom));
@@ -4681,7 +4539,7 @@ index 925da0c5..dfcb38f9 100644
  
          //            Slic3r::debugf "  layer %d has %d bottom, %d top and %d internal surfaces\n",
          //                $layerm->layer->id, scalar(@bottom), scalar(@top), scalar(@internal) if $Slic3r::debug;
-@@ -1923,6 +2030,340 @@ void PrintObject::detect_surfaces_type()
+@@ -1923,6 +2029,340 @@ void PrintObject::detect_surfaces_type()
      m_typed_slices = true;
  }
  
@@ -5022,7 +4880,7 @@ index 925da0c5..dfcb38f9 100644
  void PrintObject::process_external_surfaces()
  {
      BOOST_LOG_TRIVIAL(info) << "Processing external surfaces..." << log_memory_info();
-@@ -2063,7 +2504,7 @@ void PrintObject::discover_vertical_shells()
+@@ -2063,7 +2503,7 @@ void PrintObject::discover_vertical_shells()
                          LayerRegion &layerm               = *layer.m_regions[region_id];
                          float        top_bottom_expansion = float(layerm.flow(frSolidInfill).scaled_spacing()) * top_bottom_expansion_coeff;
                          // Top surfaces.
@@ -5031,7 +4889,7 @@ index 925da0c5..dfcb38f9 100644
  //                        append(cache.top_surfaces, offset(layerm.fill_surfaces.filter_by_type(stTop), top_bottom_expansion));
                          // Bottom surfaces.
                          append(cache.bottom_surfaces, offset(layerm.slices.filter_by_types(surfaces_bottom), top_bottom_expansion));
-@@ -2132,7 +2573,7 @@ void PrintObject::discover_vertical_shells()
+@@ -2132,7 +2572,7 @@ void PrintObject::discover_vertical_shells()
                          float        top_bottom_expansion = float(layerm.flow(frSolidInfill).scaled_spacing()) * top_bottom_expansion_coeff;
                          // Top surfaces.
                          auto &cache = cache_top_botom_regions[idx_layer];
@@ -5040,7 +4898,7 @@ index 925da0c5..dfcb38f9 100644
  //                        append(cache.top_surfaces, offset(layerm.fill_surfaces.filter_by_type(stTop), top_bottom_expansion));
                          // Bottom surfaces.
                          cache.bottom_surfaces = offset(layerm.slices.filter_by_types(surfaces_bottom), top_bottom_expansion);
-@@ -2332,14 +2773,15 @@ void PrintObject::discover_vertical_shells()
+@@ -2332,14 +2772,15 @@ void PrintObject::discover_vertical_shells()
  #endif /* SLIC3R_DEBUG_SLICE_PROCESSING */
  
                      // Trim the shells region by the internal & internal void surfaces.
@@ -5058,7 +4916,7 @@ index 925da0c5..dfcb38f9 100644
  
                      // These regions will be filled by a rectilinear full infill. Currently this type of infill
                      // only fills regions, which fit at least a single line. To avoid gaps in the sparse infill,
-@@ -2399,7 +2841,7 @@ void PrintObject::discover_vertical_shells()
+@@ -2399,7 +2840,7 @@ void PrintObject::discover_vertical_shells()
                      if (regularized_shell.empty())
                          continue;
  
@@ -5067,7 +4925,7 @@ index 925da0c5..dfcb38f9 100644
  #ifdef SLIC3R_DEBUG_SLICE_PROCESSING
                      {
                          Slic3r::SVG svg(debug_out_path("discover_vertical_shells-regularized-%d.svg", debug_idx), get_extents(shell_before));
-@@ -2426,7 +2868,10 @@ void PrintObject::discover_vertical_shells()
+@@ -2426,7 +2867,10 @@ void PrintObject::discover_vertical_shells()
  #endif /* SLIC3R_DEBUG_SLICE_PROCESSING */
  
                      // Assign resulting internal surfaces to layer.
@@ -5079,7 +4937,7 @@ index 925da0c5..dfcb38f9 100644
                      layerm->fill_surfaces.append(new_internal,       stInternal);
                      layerm->fill_surfaces.append(new_internal_void,  stInternalVoid);
                      layerm->fill_surfaces.append(new_internal_solid, stInternalSolid);
-@@ -3996,13 +4441,17 @@ void PrintObject::discover_horizontal_shells()
+@@ -3996,13 +4440,17 @@ void PrintObject::discover_horizontal_shells()
                  // Surfaces including the area of perimeters. Everything, that is visible from the top / bottom
                  // (not covered by a layer above / below).
                  // This does not contain the areas covered by perimeters!
@@ -5099,7 +4957,7 @@ index 925da0c5..dfcb38f9 100644
                          polygons_append(solid, to_polygons(surface.expolygon));
                  if (solid.empty())
                      continue;
-@@ -4124,7 +4573,15 @@ void PrintObject::discover_horizontal_shells()
+@@ -4124,7 +4572,15 @@ void PrintObject::discover_horizontal_shells()
                      // internal-solid are the union of the existing internal-solid surfaces
                      // and new ones
                      SurfaceCollection backup = std::move(neighbor_layerm->fill_surfaces);
@@ -5115,7 +4973,7 @@ index 925da0c5..dfcb38f9 100644
                      ExPolygons internal_solid = union_ex(new_internal_solid);
                      // assign new internal-solid surfaces to layer
                      neighbor_layerm->fill_surfaces.set(internal_solid, stInternalSolid);
-@@ -4143,6 +4600,7 @@ void PrintObject::discover_horizontal_shells()
+@@ -4143,6 +4599,7 @@ void PrintObject::discover_horizontal_shells()
                              diff_ex(group, polygons_internal),
                              // Use an existing surface as a template, it carries the bridge angle etc.
                              *group.front());
@@ -5483,7 +5341,7 @@ index 51373890..391437c7 100644
          wxStaticText* credits_string = new wxStaticText(this, wxID_ANY, wxString::Format("Build %s", std::string(GIT_COMMIT_HASH)), wxDefaultPosition, wxDefaultSize);
          credits_string->SetFont(_build_string_font);
 diff --git a/src/slic3r/GUI/ConfigManipulation.cpp b/src/slic3r/GUI/ConfigManipulation.cpp
-index f277ad6f..3997a82e 100644
+index f277ad6f..49e25071 100644
 --- a/src/slic3r/GUI/ConfigManipulation.cpp
 +++ b/src/slic3r/GUI/ConfigManipulation.cpp
 @@ -896,6 +896,9 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
@@ -5496,15 +5354,6 @@ index f277ad6f..3997a82e 100644
      bool has_set_other_flow_ratios = config->opt_bool("set_other_flow_ratios");
      for (auto el : {"first_layer_flow_ratio", "outer_wall_flow_ratio", "inner_wall_flow_ratio", "overhang_flow_ratio", "sparse_infill_flow_ratio", "internal_solid_infill_flow_ratio", "gap_fill_flow_ratio", "support_flow_ratio", "support_interface_flow_ratio"})
          toggle_line(el, has_set_other_flow_ratios);
-@@ -911,7 +914,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
-     toggle_line("support_interface_not_for_body",config->opt_int("support_interface_filament")&&!config->opt_int("support_filament"));
- 
-     // Get the current fuzzy skin state
--    bool has_fuzzy_skin = config->opt_enum<FuzzySkinType>("fuzzy_skin") != FuzzySkinType::Disabled_fuzzy;
-+    bool has_fuzzy_skin = config->opt_enum<FuzzySkinType>("fuzzy_skin") != FuzzySkinType::Disabled_fuzzy || config->opt_bool("fuzzy_skin_top_surface");
-     
-     // Show fuzzy skin options when fuzzy skin is not disabled
-     for (auto el : {"fuzzy_skin_mode", "fuzzy_skin_noise_type", "fuzzy_skin_point_distance", "fuzzy_skin_thickness", "fuzzy_skin_first_layer"})
 diff --git a/src/slic3r/GUI/GUI_App.cpp b/src/slic3r/GUI/GUI_App.cpp
 index 56733046..eb219d5f 100644
 --- a/src/slic3r/GUI/GUI_App.cpp
@@ -5594,7 +5443,7 @@ index 14a40ded..5a7eb14a 100644
      // managed by Windows Settings; the runtime registry toggles below cannot work.
      // Show a minimal page that sends the user to Windows' Default Apps settings instead.
 diff --git a/src/slic3r/GUI/Tab.cpp b/src/slic3r/GUI/Tab.cpp
-index 7e1455c5..57113f9a 100644
+index 7e1455c5..f861cca8 100644
 --- a/src/slic3r/GUI/Tab.cpp
 +++ b/src/slic3r/GUI/Tab.cpp
 @@ -2383,6 +2383,15 @@ void TabPrint::build()
@@ -5613,7 +5462,7 @@ index 7e1455c5..57113f9a 100644
          optgroup = page->new_optgroup(L("Wall generator"), L"param_wall_generator");
          optgroup->append_single_option_line("wall_generator", "quality_settings_wall_generator");
          optgroup->append_single_option_line("wall_transition_angle", "quality_settings_wall_generator#wall-transitioning-threshhold-angle");
-@@ -2730,11 +2739,13 @@ void TabPrint::build()
+@@ -2730,6 +2739,7 @@ void TabPrint::build()
          optgroup->append_single_option_line("spiral_starting_flow_ratio", "others_settings_special_mode#spiral-starting-flow-ratio");
          optgroup->append_single_option_line("spiral_finishing_flow_ratio", "others_settings_special_mode#spiral-finishing-flow-ratio");
  
@@ -5621,12 +5470,6 @@ index 7e1455c5..57113f9a 100644
          optgroup->append_single_option_line("timelapse_type", "others_settings_special_mode#timelapse");
          optgroup->append_single_option_line("enable_wrapping_detection");
  
-         optgroup = page->new_optgroup(L("Fuzzy Skin"), L"fuzzy_skin");
-         optgroup->append_single_option_line("fuzzy_skin", "others_settings_fuzzy_skin");
-+        optgroup->append_single_option_line("fuzzy_skin_top_surface", "others_settings_fuzzy_skin");
-         optgroup->append_single_option_line("fuzzy_skin_mode", "others_settings_fuzzy_skin#fuzzy-skin-mode");
-         optgroup->append_single_option_line("fuzzy_skin_noise_type", "others_settings_fuzzy_skin#noise-type");
-         optgroup->append_single_option_line("fuzzy_skin_point_distance", "others_settings_fuzzy_skin#point-distance");
 diff --git a/tests/fff_print/CMakeLists.txt b/tests/fff_print/CMakeLists.txt
 index a91d2560..eb0b1236 100644
 --- a/tests/fff_print/CMakeLists.txt

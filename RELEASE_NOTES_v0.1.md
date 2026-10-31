@@ -4,7 +4,7 @@ First public test release of OrcaSlicer Nonplanar (OrcaSlicer 2.4.2) for macOS (
 - Nonplanar top surfaces up to 12° and 5 mm height span; the visible top shell is printed in one piece.
 - Collision check against a simplified hotend model (tip, 12° cone, heater block), with planned print order.
 - No move steeper than 12° in the G-code; clear messages when a model can't be sliced collision-free.
-- Slope compensation, top line direction and top flow ratio options.
+- Slope compensation, top line direction and top flow ratio options; top surfaces at 50 mm/s at most.
 - Own settings folder; an installed OrcaSlicer (settings, file associations, links) stays untouched.
 
 **Compared with the original PrusaSlicer nonplanar build (2.6.0+teachingtechYT)**, tested on 8 models with the
@@ -20,6 +20,5 @@ same A1 mini settings (12°, 5 mm):
 - Open the DMG and drag the app to Applications. The app is unsigned: on macOS 15 and newer, start it once,
   then click "Open Anyway" in System Settings > Privacy & Security (older macOS: right-click > Open).
 - Print `test-prints/Nonplanar vs Standard Comparison v1.0.3mf` from the repository first.
-- Recommended: top surface speed 50 mm/s (Process > Speed > Other layers speed > Top surface).
 
 **Known limits:** macOS on Apple Silicon only (no Intel Macs, Windows or Linux), one hotend model for all printers, unsigned, test status.

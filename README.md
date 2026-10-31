@@ -56,12 +56,7 @@ More test prints (for any printer):
 1. [Nonplanar test print](https://www.printables.com/model/1892634-nonplanar-test-print)
 2. [Nonplanar surface coaster](https://www.printables.com/model/1892733-nonplanar-surface-coaster-bambu-a1-family-only)
 
-## Recommended settings
-
-| Setting | Where (Process tab) | Recommendation |
-|---|---|---|
-| Top surface speed | **Speed > Other layers speed > Top surface** | **50 mm/s**: smoother nonplanar tops |
-| Nonplanar layers | **Quality > Nonplanar layers** | on (default), 12°, 5 mm |
+## Settings
 
 > [!NOTE]
 > **Where to find the nonplanar settings:** the group **Nonplanar layers** is at the bottom of the
@@ -73,6 +68,9 @@ The group contains:
 - **Maximum nonplanar angle** (12°) and **Maximum nonplanar height** (5 mm);
 - **Nonplanar top surface direction**: fixed line direction for nonplanar tops;
 - **Nonplanar top surface flow ratio**.
+
+**Top surface speed** is limited to **50 mm/s** automatically for objects with nonplanar layers (smoother
+nonplanar tops). Lower values in *Speed > Other layers speed > Top surface* are kept.
 
 To print one object planar (like the "standard" half of the comparison test), right-click it in the object list,
 add the Quality setting *Use nonplanar layers* and switch it off.
@@ -94,6 +92,7 @@ add the Quality setting *Use nonplanar layers* and switch it off.
   exists, slicing stops with a clear message (height, layer, what blocks what, what to change) instead of
   printing a collision.
 - **No move steeper than 12°**, checked on the final G-code.
+- **Top surfaces at 50 mm/s at most** on objects with nonplanar layers.
 - **Slope compensation:** downhill top lines are raised and uphill lines lowered slightly, so the line direction
   doesn't show on slopes.
 
