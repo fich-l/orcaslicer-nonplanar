@@ -5931,3 +5931,1962 @@ index 76985433..6d85630a 100644
  string(REGEX MATCH "^([0-9]+)\\.([0-9]+)\\.([0-9]+)"
         SoftFever_VERSION_MATCH ${SoftFever_VERSION})
  set(ORCA_VERSION_MAJOR ${CMAKE_MATCH_1})
+
+diff --git a/src/libslic3r/NonplanarSchedule.cpp b/src/libslic3r/NonplanarSchedule.cpp
+index 51cf2535..23c56401 100644
+--- a/src/libslic3r/NonplanarSchedule.cpp
++++ b/src/libslic3r/NonplanarSchedule.cpp
+@@ -10,6 +10,9 @@
+ 
+ #include <boost/log/trivial.hpp>
+ 
++#include <oneapi/tbb/blocked_range.h>
++#include <oneapi/tbb/parallel_for.h>
++
+ #include <algorithm>
+ #include <cmath>
+ #include <cstdio>
+@@ -445,8 +448,6 @@ NonplanarDeferral plan_nonplanar_deferral(const PrintObject &object, const Nonpl
+                 found(r2);
+         });
+     };
+-    // Units already known to follow the unit being collected (by unit index).
+-    std::vector<int> collected_for;
+     // Coarse cells grouped by unit (rebuilt per attempt): the highest material
+     // of a group decides whether its samples can obstruct a toolhead box at all,
+     // and a unit already collected is skipped as a whole.
+@@ -455,7 +456,8 @@ NonplanarDeferral plan_nonplanar_deferral(const PrintObject &object, const Nonpl
+     std::vector<int> cell_samples;
+     // Units under the toolhead boxes at sample t that follow unit u (exact:
+     // blocks() decides per sample; the rings are visited separately).
+-    auto collect_box_dependents = [&](int t, int u, std::vector<int> &out, const std::vector<char> *only = nullptr) {
++    auto collect_box_dependents = [&](int t, int u, std::vector<int> &out, const std::vector<char> *only,
++                                      std::vector<int> &mark) {
+         if (model.boxes.empty())
+             return;
+         const Sample &s0 = all[size_t(t)];
+@@ -473,7 +475,7 @@ NonplanarDeferral plan_nonplanar_deferral(const PrintObject &object, const Nonpl
+                 if (key < 0 || cell_groups[size_t(key)].empty() || coarse_zmax[size_t(key)] <= lowest_floor)
+                     continue;
+                 for (const CellGroup &g : cell_groups[size_t(key)]) {
+-                    if (g.unit == u || collected_for[size_t(g.unit)] == u || g.zmax <= lowest_floor ||
++                    if (g.unit == u || mark[size_t(g.unit)] == u || g.zmax <= lowest_floor ||
+                         (only != nullptr && ! (*only)[size_t(g.unit)]))
+                         continue;
+                     bool covered = false;
+@@ -490,7 +492,7 @@ NonplanarDeferral plan_nonplanar_deferral(const PrintObject &object, const Nonpl
+                         continue;
+                     for (int k = g.begin; k < g.end && all[size_t(cell_samples[size_t(k)])].z > s0.z + block_dz_min; ++ k)
+                         if (cell_samples[size_t(k)] != t && blocks(all[size_t(cell_samples[size_t(k)])], s0)) {
+-                            collected_for[size_t(g.unit)] = u;
++                            mark[size_t(g.unit)] = u;
+                             out.push_back(g.unit);
+                             break;
+                         }
+@@ -622,7 +624,6 @@ NonplanarDeferral plan_nonplanar_deferral(const PrintObject &object, const Nonpl
+             }
+             dependents.assign(size_t(next), {});
+             dependents_known.assign(size_t(next), 0);
+-            collected_for.assign(size_t(next), -1);
+             for (std::vector<CellGroup> &groups : cell_groups)
+                 groups.clear();
+             {
+@@ -678,15 +679,15 @@ NonplanarDeferral plan_nonplanar_deferral(const PrintObject &object, const Nonpl
+         // tool at u's samples, and material resting on them.
+         // Fresh: every unit; pending: only the changed units (the others are
+         // carried over).  Exact: the same existence test as a fresh list.
+-        auto collect_dependents = [&](int u, bool only_changed, std::vector<int> &out) {
++        auto collect_dependents = [&](int u, bool only_changed, std::vector<int> &out, std::vector<int> &mark) {
+             // A unit found once is not tested again for further samples
+-            // (collected_for holds the collecting unit, reset per attempt).
++            // (mark holds the collecting unit, one buffer per collection).
+             for (int t : members[size_t(u)]) {
+                 visit_followers(t,
+-                    [&](int m) { const int v = unit_of[size_t(m)]; return v != u && collected_for[size_t(v)] != u && (! only_changed || changed[size_t(v)]); },
+-                    [&](int m) { const int v = unit_of[size_t(m)]; if (collected_for[size_t(v)] != u) { collected_for[size_t(v)] = u; out.push_back(v); } },
++                    [&](int m) { const int v = unit_of[size_t(m)]; return v != u && mark[size_t(v)] != u && (! only_changed || changed[size_t(v)]); },
++                    [&](int m) { const int v = unit_of[size_t(m)]; if (mark[size_t(v)] != u) { mark[size_t(v)] = u; out.push_back(v); } },
+                     false);
+-                collect_box_dependents(t, u, out, only_changed ? &changed : nullptr);
++                collect_box_dependents(t, u, out, only_changed ? &changed : nullptr, mark);
+             }
+         };
+         auto dependents_of = [&](int u) -> const std::vector<int>& {
+@@ -694,22 +695,23 @@ NonplanarDeferral plan_nonplanar_deferral(const PrintObject &object, const Nonpl
+                 std::vector<int> &list = raw[size_t(u)];
+                 const bool carried = raw_known[size_t(u)];
+                 if (! carried) {
+-                    collect_dependents(u, false, list);
++                    std::vector<int> mark(members.size(), -1);
++                    collect_dependents(u, false, list, mark);
+                     std::sort(list.begin(), list.end());
+                     raw_known[size_t(u)] = 1;
+                 } else if (pending[size_t(u)]) {
++                    // The carried entries count as already collected.
++                    std::vector<int> mark(members.size(), -1);
+                     for (int v : list)
+-                        collected_for[size_t(v)] = u;
+-                    collect_dependents(u, true, list);
++                        mark[size_t(v)] = u;
++                    collect_dependents(u, true, list, mark);
+                     std::sort(list.begin(), list.end());
+                     pending[size_t(u)] = 0;
+                 }
+                 if (carried && verify_dependents) {
+-                    std::vector<int> saved = collected_for, fresh;
+-                    std::fill(collected_for.begin(), collected_for.end(), -1);
+-                    collect_dependents(u, false, fresh);
++                    std::vector<int> fresh, mark(members.size(), -1);
++                    collect_dependents(u, false, fresh, mark);
+                     std::sort(fresh.begin(), fresh.end());
+-                    collected_for = std::move(saved);
+                     if (fresh != list)
+                         throw Slic3r::RuntimeError("Nonplanar deposition order: carried dependents differ from a fresh computation (attempt " +
+                                                    std::to_string(attempt + 1) + ", unit " + std::to_string(u) + ")");
+@@ -809,6 +811,41 @@ NonplanarDeferral plan_nonplanar_deferral(const PrintObject &object, const Nonpl
+             }
+         }
+ 
++        // Compute the dependents of every unit up front: each collection uses its
++        // own marker buffer, so the units are independent and the walk below only
++        // reads the lists.  (On attempts after a refinement the carried lists are
++        // used instead; see dependents_of.)
++        if (attempt == 0) {
++            tbb::parallel_for(tbb::blocked_range<int>(0, int(members.size())), [&](const tbb::blocked_range<int> &range) {
++                std::vector<int> mark(members.size(), -1);
++                for (int u = range.begin(); u < range.end(); ++ u) {
++                    if ((u & 31) == 0)
++                        throw_if_canceled();
++                    std::vector<int> list;
++                    collect_dependents(u, false, list, mark);
++                    std::sort(list.begin(), list.end());
++                    raw[size_t(u)]      = std::move(list);
++                    raw_known[size_t(u)] = 1;
++                    std::fill(mark.begin(), mark.end(), -1);
++                }
++            });
++            // NONPLANAR_PLAN_VERIFY=1: the parallel lists must equal a fresh
++            // sequential computation of the same unit.
++            if (verify_dependents) {
++                size_t bad = 0;
++                for (int u = 0; u < int(members.size()); ++ u) {
++                    std::vector<int> fresh, mark(members.size(), -1);
++                    collect_dependents(u, false, fresh, mark);
++                    std::sort(fresh.begin(), fresh.end());
++                    if (fresh != raw[size_t(u)])
++                        ++ bad;
++                }
++                if (bad != 0)
++                    throw Slic3r::RuntimeError("Nonplanar deposition order: parallel dependents differ from a sequential computation (" +
++                                               std::to_string(bad) + " units)");
++            }
++        }
++
+         std::vector<int> parent(members.size(), -1);
+         std::vector<int> worklist;
+         std::vector<int> cycle;
+diff --git a/src/libslic3r/PrintObject.cpp b/src/libslic3r/PrintObject.cpp
+index e4d9f9e4..86434cfe 100644
+--- a/src/libslic3r/PrintObject.cpp
++++ b/src/libslic3r/PrintObject.cpp
+@@ -2157,6 +2157,9 @@ PrintObject::detect_nonplanar_surfaces()
+         int stable_surface_id = 0;
+         for (auto& nonplanar_surface: this->nonplanar_surfaces()) {
+             nonplanar_surface.stable_id = stable_surface_id++;
++            // The projection is rebuilt from the mesh on every call, so compute it
++            // once per surface instead of once per (shell, home layer, layer).
++            const ExPolygons np_projection = nonplanar_surface.horizontal_projection();
+             float distance_to_top = 0.0f;            
+             for (int shell_thickness = 0; region.config().top_shell_layers > shell_thickness; ++shell_thickness){
+                 //search home layer where the area is projected to
+@@ -2189,14 +2192,14 @@ PrintObject::detect_nonplanar_surfaces()
+                             LayerRegion &upper_layerm = *upper_layer->m_regions[region_id];
+                             Surfaces upper_surfaces = upper_layerm.slices.surfaces;
+                             topNonplanar.append(
+-                                intersection_ex(
+-                                    nonplanar_surface.horizontal_projection(),
+-                                    union_ex(
+-                                        diff_ex(
+-                                            layerm_slices_surfaces, 
+-                                            upper_surfaces, 
+-                                            ApplySafetyOffset::No)), 
+-                                    ApplySafetyOffset::No),
++                                    intersection_ex(
++                                        np_projection,
++                                        union_ex(
++                                            diff_ex(
++                                                layerm_slices_surfaces, 
++                                                upper_surfaces, 
++                                                ApplySafetyOffset::No)), 
++                                        ApplySafetyOffset::No),
+                                 (shell_thickness == 0 ? stTopNonplanar : stInternalSolidNonplanar),
+                                 distance_to_top
+                             );
+@@ -2214,7 +2217,7 @@ PrintObject::detect_nonplanar_surfaces()
+                             if (upper_nonplanar.size() > 0)
+                                 topNonplanar.append(
+                                     intersection_ex(
+-                                        nonplanar_surface.horizontal_projection(),
++                                        np_projection,
+                                         to_expolygons(upper_nonplanar.surfaces),
+                                         ApplySafetyOffset::No),
+                                     (shell_thickness == 0 ? stTopNonplanar : stInternalSolidNonplanar),
+@@ -2224,7 +2227,7 @@ PrintObject::detect_nonplanar_surfaces()
+                         else {
+                             topNonplanar.append(
+                                 intersection_ex(
+-                                    nonplanar_surface.horizontal_projection(),
++                                    np_projection,
+                                     union_ex(to_expolygons(layerm_slices_surfaces)),
+                                     ApplySafetyOffset::No),
+                                 (shell_thickness == 0 ? stTopNonplanar : stInternalSolidNonplanar),
+diff --git a/localization/i18n/tr/OrcaSlicer_tr.po b/localization/i18n/tr/OrcaSlicer_tr.po
+index 6fb03925..a1a0c5f4 100644
+--- a/localization/i18n/tr/OrcaSlicer_tr.po
++++ b/localization/i18n/tr/OrcaSlicer_tr.po
+@@ -24333,3 +24333,57 @@ msgstr ""
+ #~ "Sıcaklık farkı çok büyük olan birden fazla filament aynı anda basılamaz. "
+ #~ "Aksi takdirde ekstruder ve nozul baskı sırasında tıkanabilir veya zarar "
+ #~ "görebilir"
++
++msgid "Nonplanar edge fix"
++msgstr "Nonplanar kenar düzeltmesi"
++
++msgid "Extend the nonplanar top shells to the model's outer edge so no gap or notch is left where planar layers meet the nonplanar surface."
++msgstr "Nonplanar üst kabukları modelin dış kenarına kadar uzatır; böylece düzlemsel katmanların nonplanar yüzeyle buluştuğu yerde boşluk veya çentik kalmaz."
++
++msgid "Nonplanar ironing"
++msgstr "Nonplanar ütüleme"
++
++msgid "Iron the visible nonplanar top shell along the surface with a very low flow. The nozzle tip never goes below the surface: on a slope only its uphill edge touches."
++msgstr "Görünen nonplanar üst kabuğu, yüzeyi izleyerek çok düşük akışla ütüler. Nozül ucu hiçbir zaman yüzeyin altına inmez: eğimde ucun yalnızca yokuş yukarı kenarı değer."
++
++msgid "Nonplanar ironing flow"
++msgstr "Nonplanar ütüleme akışı"
++
++msgid "The amount of material to extrude during nonplanar ironing, relative to the flow of the normal layer height."
++msgstr "Nonplanar ütülemede verilecek malzeme miktarı; normal katman yüksekliğindeki akışa göre."
++
++msgid "Nonplanar ironing line spacing"
++msgstr "Nonplanar ütüleme çizgi aralığı"
++
++msgid "The distance between the lines of nonplanar ironing."
++msgstr "Nonplanar ütüleme çizgileri arasındaki mesafe."
++
++msgid "Nonplanar ironing maximum angle"
++msgstr "Nonplanar ütüleme en büyük açısı"
++
++msgid "Surface parts steeper than this are not ironed: there only a thin edge of the nozzle tip would touch."
++msgstr "Bundan daha dik yüzey kısımları ütülenmez: oralarda nozül ucunun yalnızca ince bir kenarı değerdi."
++
++msgid "Nonplanar ironing height offset"
++msgstr "Nonplanar ütüleme yükseklik payı"
++
++msgid "Height of the nozzle tip above the highest surface point under it. Negative values press into the surface."
++msgstr "Nozül ucunun, altındaki en yüksek yüzey noktasının ne kadar üstünde duracağı. Eksi değerler yüzeye bastırır."
++
++msgid "Nonplanar ironing slope press"
++msgstr "Nonplanar ütüleme eğim baskısı"
++
++msgid "On a slope the flat nozzle tip only touches with its uphill edge and its middle stays above the surface. This lowers the tip by this share of that gap so the slopes are ironed too; flat parts are not changed. The press is never more than 0.05 mm."
++msgstr "Eğimli yüzeyde nozzle'ın düz ucu yüzeye yalnızca yokuş yukarı kenarıyla değer, ortası yüzeyin üstünde kalır. Bu ayar ucu bu boşluğun bu oranı kadar indirir, böylece yamaçlar da ütülenir; düz yerler değişmez. Baskı hiçbir zaman 0,05 mm'yi geçmez."
++
++msgid "Extend nonplanar shell to the edge"
++msgstr "Nonplanar kabuğu kenara uzat"
++
++msgid "Where the nonplanar top shell stops short of the outer wall (a steep edge or fillet), the thin planar strip left between the shell and the wall is printed as part of the shell, so the shell's outer line follows the model's outline without notches. Where the shell already reaches the wall nothing is changed."
++msgstr "Nonplanar üst kabuk dış duvara kadar ulaşamadığında (dik kenar ya da pah), kabukla duvar arasında kalan ince düz şerit kabuğun parçası olarak basılır; böylece kabuğun dış çizgisi modelin dış hattını çentiksiz takip eder. Kabuk duvara zaten ulaşıyorsa hiçbir şey değişmez."
++
++msgid "Nonplanar ironing cross pass"
++msgstr "Nonplanar ütüleme çapraz geçiş"
++
++msgid "Iron the nonplanar surface a second time with the lines turned by 90 degrees. The second pass flattens the ridges the first one leaves; ironing takes twice as long."
++msgstr "Nonplanar yüzeyi çizgileri 90 derece döndürerek ikinci kez ütüler. İkinci geçiş, ilkinin bıraktığı sırtları ezer; ütüleme iki kat uzun sürer."
+diff --git a/src/libslic3r/CMakeLists.txt b/src/libslic3r/CMakeLists.txt
+index ae710f98..e2608a41 100644
+--- a/src/libslic3r/CMakeLists.txt
++++ b/src/libslic3r/CMakeLists.txt
+@@ -338,6 +338,8 @@ set(lisbslic3r_sources
+     NonplanarSchedule.hpp
+     NonplanarSurface.cpp
+     NonplanarSurface.hpp
++    NonplanarIroning.cpp
++    NonplanarTipHeight.hpp
+     PNGReadWrite.cpp
+     PNGReadWrite.hpp
+     Point.cpp
+diff --git a/src/libslic3r/ExtrusionEntity.hpp b/src/libslic3r/ExtrusionEntity.hpp
+index 07baa04e..5179bdf3 100644
+--- a/src/libslic3r/ExtrusionEntity.hpp
++++ b/src/libslic3r/ExtrusionEntity.hpp
+@@ -181,6 +181,12 @@ public:
+     size_t source_layer_id = size_t(-1);
+     int source_surface_id = -1;
+     uint64_t source_path_id = 0;
++    // OrcaSlicer Nonplanar edge prototype: the steepest slope this projected path is
++    // allowed to have.  Material next to a wall follows the fillet, which is steeper
++    // than the 12 deg limit of a plain conformal line; the value comes from the facets
++    // the path was actually projected onto, so a path on the shallow target surface
++    // keeps the normal limit.
++    float max_slope_deg = 12.f;
+ 
+     ExtrusionPath() : mm3_per_mm(-1), width(-1), height(-1), m_role(erNone), m_no_extrusion(false) {}
+     ExtrusionPath(ExtrusionRole role) : mm3_per_mm(-1), width(-1), height(-1), m_role(role), m_no_extrusion(false) {}
+@@ -200,6 +206,7 @@ public:
+         , source_layer_id(rhs.source_layer_id)
+         , source_surface_id(rhs.source_surface_id)
+         , source_path_id(rhs.source_path_id)
++        , max_slope_deg(rhs.max_slope_deg)
+         , m_can_reverse(rhs.m_can_reverse)
+         , m_role(rhs.m_role)
+         , m_no_extrusion(rhs.m_no_extrusion)
+@@ -218,6 +225,7 @@ public:
+         , source_layer_id(rhs.source_layer_id)
+         , source_surface_id(rhs.source_surface_id)
+         , source_path_id(rhs.source_path_id)
++        , max_slope_deg(rhs.max_slope_deg)
+         , m_can_reverse(rhs.m_can_reverse)
+         , m_role(rhs.m_role)
+         , m_no_extrusion(rhs.m_no_extrusion)
+@@ -236,6 +244,7 @@ public:
+         , source_layer_id(rhs.source_layer_id)
+         , source_surface_id(rhs.source_surface_id)
+         , source_path_id(rhs.source_path_id)
++        , max_slope_deg(rhs.max_slope_deg)
+         , m_can_reverse(rhs.m_can_reverse)
+         , m_role(rhs.m_role)
+         , m_no_extrusion(rhs.m_no_extrusion)
+@@ -254,6 +263,7 @@ public:
+         , source_layer_id(rhs.source_layer_id)
+         , source_surface_id(rhs.source_surface_id)
+         , source_path_id(rhs.source_path_id)
++        , max_slope_deg(rhs.max_slope_deg)
+         , m_can_reverse(rhs.m_can_reverse)
+         , m_role(rhs.m_role)
+         , m_no_extrusion(rhs.m_no_extrusion)
+@@ -273,6 +283,7 @@ public:
+         this->source_layer_id = rhs.source_layer_id;
+         this->source_surface_id = rhs.source_surface_id;
+         this->source_path_id = rhs.source_path_id;
++        this->max_slope_deg = rhs.max_slope_deg;
+         this->overhang_degree = rhs.overhang_degree;
+         this->curve_degree = rhs.curve_degree;
+         this->polyline = rhs.polyline;
+@@ -292,6 +303,7 @@ public:
+         this->source_layer_id = rhs.source_layer_id;
+         this->source_surface_id = rhs.source_surface_id;
+         this->source_path_id = rhs.source_path_id;
++        this->max_slope_deg = rhs.max_slope_deg;
+         this->overhang_degree = rhs.overhang_degree;
+         this->curve_degree = rhs.curve_degree;
+         this->polyline = std::move(rhs.polyline);
+diff --git a/src/libslic3r/Fill/Fill.cpp b/src/libslic3r/Fill/Fill.cpp
+index a2eff09a..c4e9fedf 100644
+--- a/src/libslic3r/Fill/Fill.cpp
++++ b/src/libslic3r/Fill/Fill.cpp
+@@ -1737,7 +1737,10 @@ void Layer::make_ironing()
+ 				if (iron_completely) {
+ 					// Iron everything. This is likely only good for solid transparent objects.
+ 					for (const Surface &surface : ironing_params.layerm->slices.surfaces)
+-						polygons_append(polys, surface.expolygon);
++						// Nonplanar shells are curved: a flat ironing pass at this layer's height
++						// would run through them.  They have their own ironing (nonplanar_ironing).
++						if (! surface.is_nonplanar())
++							polygons_append(polys, surface.expolygon);
+ 				} else {
+ 					for (const Surface &surface : ironing_params.layerm->slices.surfaces)
+ 						if ((surface.surface_type == stTop && (region_config.top_shell_layers > 0 || this->object()->print()->config().spiral_mode)) || (iron_everything && surface.surface_type == stBottom && region_config.bottom_shell_layers > 0))
+diff --git a/src/libslic3r/GCode.cpp b/src/libslic3r/GCode.cpp
+index c8b76d9a..5cf64a26 100644
+--- a/src/libslic3r/GCode.cpp
++++ b/src/libslic3r/GCode.cpp
+@@ -3537,6 +3537,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
+                 // and export G-code into file.
+                 tool_ordering.cal_most_used_extruder(print.config());
+                 m_printed_objects.emplace_back(&object);
++                m_deferral_tool_ordering = &tool_ordering;
+                 this->process_layers(print, tool_ordering, collect_layers_to_print(object), *print_object_instance_sequential_active - object.instances().data(), file,
+                                      prime_extruder);
+                 {
+@@ -3620,6 +3621,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
+             // Process all layers of all objects (non-sequential mode) with a parallel pipeline:
+             // Generate G-code, run the filters (vase mode, cooling buffer), run the G-code analyser
+             // and export G-code into file.
++            m_deferral_tool_ordering = &tool_ordering;
+             this->process_layers(print, tool_ordering, print_object_instances_ordering, layers_to_print, file);
+             {
+                 //save the flush statitics stored in tool ordering
+@@ -3644,9 +3646,17 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
+     // Deferred material must have been emitted in its slot.  Anything left
+     // would be silently missing from the print.
+     for (const auto &[key, queue] : m_deferred_extrusions)
+-        if (! queue.empty())
++        if (! queue.empty()) {
++            std::string detail;
++            for (size_t i = 0; i < queue.size() && i < 6; ++ i)
++                detail += " [slot " + std::to_string(queue[i].slot) + " from layer " + std::to_string(queue[i].source_layer) +
++                          " filament " + std::to_string(queue[i].extruder + 1) + "]";
++            BOOST_LOG_TRIVIAL(error) << "Nonplanar: unwritten moved extrusions:" << detail;
++            if (std::getenv("NONPLANAR_EDGE_DEBUG") != nullptr)
++                std::cerr << "[DEFER] unwritten:" << detail << std::endl;
+             throw_nonplanar_internal("", std::to_string(queue.size()) + " moved extrusions were never written",
+                 key.first != nullptr ? key.first->id().id : 0);
++        }
+ 
+     //BBS: the last retraction
+     // Write end commands to file.
+@@ -6522,11 +6532,26 @@ std::string GCode::emit_deferred_after_layer(const PrintObject &print_object, un
+     // remaining slots follow in ascending order.
+     const int  slot = 2 * int(m_deferral_layer_id) + 1;
+     const bool last = m_deferral_layer_id == print_object.layers().back()->id();
++    // The plan orders material by height only, not by filament: material of a filament
++    // can be planned after a layer that filament does not print (e.g. the top of a
++    // two-colour inlay deferred past the layer where the inlay ends).  Such material is
++    // written at this filament's next turn on this object; on its last turn (no later
++    // layer uses it) everything still queued for it is written now, as late as possible.
++    bool used_later = false;
++    if (m_deferral_tool_ordering != nullptr && m_deferral_layer_id < print_object.layers().size()) {
++        const double z = print_object.layers()[m_deferral_layer_id]->print_z;
++        for (const LayerTools &lt : m_deferral_tool_ordering->layer_tools())
++            if (lt.print_z > z + EPSILON && std::find(lt.extruders.begin(), lt.extruders.end(), extruder_id) != lt.extruders.end()) {
++                used_later = true;
++                break;
++            }
++    } else
++        used_later = true;
+     auto it = m_deferred_extrusions.find(m_deferral_key);
+     while (it != m_deferred_extrusions.end()) {
+         int next = std::numeric_limits<int>::max();
+         for (const DeferredExtrusion &d : it->second)
+-            if (d.extruder == extruder_id && (d.slot == slot || (last && d.slot > slot)))
++            if (d.extruder == extruder_id && (d.slot <= slot || last || ! used_later))
+                 next = std::min(next, d.slot);
+         if (next == std::numeric_limits<int>::max())
+             break;
+@@ -6846,7 +6871,11 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description,
+             return;
+         const double dxy = std::hypot(to.x() - from.x(), to.y() - from.y());
+         const double dz = std::abs(to.z() - from.z());
+-        constexpr double max_gradient = 0.21255656167002213; // tan(12 degrees)
++        // The projection decided how steep this path may run: material that follows the
++        // edge fillet is allowed more than the normal 12 degrees, everything else keeps
++        // the plain limit.  Carrying the number on the path keeps this final check in
++        // agreement with the projection instead of re-reading an environment variable.
++        const double max_gradient = std::tan(double(path.max_slope_deg) * M_PI / 180.0);
+         // XYZ is rounded to 0.001 mm immediately before emission.  Account for
+         // that one quantization interval only.
+         constexpr double quantized_z_delta = 0.001;
+diff --git a/src/libslic3r/GCode.hpp b/src/libslic3r/GCode.hpp
+index 435baf38..ec6c713e 100644
+--- a/src/libslic3r/GCode.hpp
++++ b/src/libslic3r/GCode.hpp
+@@ -645,6 +645,8 @@ private:
+     std::map<std::pair<const PrintObject*, size_t>, std::vector<DeferredExtrusion>> m_deferred_extrusions;
+     const NonplanarDeferral            *m_deferral_plan { nullptr };
+     std::pair<const PrintObject*, size_t> m_deferral_key { nullptr, 0 };
++    // Filaments per print height, to tell whether a filament still prints later.
++    ToolOrdering                       *m_deferral_tool_ordering { nullptr };
+     size_t                              m_deferral_layer_id { 0 };
+     const PrintRegion                  *m_current_region { nullptr };
+     // Travels to, between and away from deferred material are lifted above
+diff --git a/src/libslic3r/Layer.cpp b/src/libslic3r/Layer.cpp
+index 0ba5b8a3..653c97c7 100644
+--- a/src/libslic3r/Layer.cpp
++++ b/src/libslic3r/Layer.cpp
+@@ -504,6 +504,16 @@ LayerRegion::merge_nonplanar_shell_slices() {
+         }
+         i = j;
+     }
++    // Edge extension: the union of the surface's facets leaves microscopic holes (slivers
++    // between facets); the perimeter generator wraps a loop around each of them, which pulls
++    // the shell's outer line into a V wherever such a sliver lies near the edge.
++    if (nonplanar_edge_reach(this->layer()->object()->config().nonplanar_edge_fix.value) > 0.) {
++        const double min_hole = scale_(0.1) * scale_(0.1);
++        for (Surface &s : out)
++            if (s.is_nonplanar())
++                s.expolygon.holes.erase(std::remove_if(s.expolygon.holes.begin(), s.expolygon.holes.end(),
++                    [min_hole](const Polygon &h) { return std::abs(h.area()) < min_hole; }), s.expolygon.holes.end());
++    }
+     this->slices.surfaces = std::move(out);
+ }
+ 
+diff --git a/src/libslic3r/Layer.hpp b/src/libslic3r/Layer.hpp
+index c5b65455..ae85e954 100644
+--- a/src/libslic3r/Layer.hpp
++++ b/src/libslic3r/Layer.hpp
+@@ -229,6 +229,8 @@ public:
+                                                                            FillAdaptive::Octree *support_fill_octree,
+                                                                            FillLightning::Generator* lightning_generator) const;
+     void 					make_ironing();
++    // Nonplanar ironing of the visible conformal shell (NonplanarIroning.cpp).
++    void 					make_nonplanar_ironing();
+     void                    make_contour_z(const sla::IndexedMesh &mesh);
+ 
+     void                    export_region_slices_to_svg(const char *path) const;
+diff --git a/src/libslic3r/LayerRegion.cpp b/src/libslic3r/LayerRegion.cpp
+index 6e63c076..49c60c08 100644
+--- a/src/libslic3r/LayerRegion.cpp
++++ b/src/libslic3r/LayerRegion.cpp
+@@ -10,6 +10,9 @@
+ #include "SVG.hpp"
+ #include "Algorithm/RegionExpansion.hpp"
+ 
++#include <cstdlib>
++#include <iostream>
++#include <sstream>
+ #include <string>
+ #include <map>
+ #include <unordered_map>
+@@ -20,6 +23,11 @@
+ 
+ namespace Slic3r {
+ 
++// Steepest slope a conformal line may follow when it runs on the edge fillet (a rim
++// facet) instead of the shallow target surface.  Above this the nozzle would have to
++// descend into material that is already printed.
++static constexpr double NONPLANAR_EDGE_MAX_ANGLE = 45.0;
++
+ // Built once per layer region.  The original projector scanned every facet
+ // for every tiny extrusion segment, which is quadratic on dense surfaces.
+ // The index only changes candidate selection; exact facet tests below remain
+@@ -29,17 +37,12 @@ public:
+     using Ref = std::pair<size_t, int>;
+     explicit NonplanarProjectionIndex(const NonplanarSurfaces &surfaces)
+     {
+-        for (size_t si = 0; si < surfaces.size(); ++si)
+-            for (const auto &entry : surfaces[si].mesh) {
+-                const auto &v = entry.second.vertex;
+-                const double xmin = std::min({double(v[0].x), double(v[1].x), double(v[2].x)});
+-                const double xmax = std::max({double(v[0].x), double(v[1].x), double(v[2].x)});
+-                const double ymin = std::min({double(v[0].y), double(v[1].y), double(v[2].y)});
+-                const double ymax = std::max({double(v[0].y), double(v[1].y), double(v[2].y)});
+-                for (int ix = cell(xmin); ix <= cell(xmax); ++ix)
+-                    for (int iy = cell(ymin); iy <= cell(ymax); ++iy)
+-                        m_cells[key(ix, iy)].emplace_back(si, entry.first);
+-            }
++        for (size_t si = 0; si < surfaces.size(); ++si) {
++            add_facets(si, surfaces[si].mesh);
++            // Rim facets are projection targets as well: with the feature on, a
++            // conformal strip may reach the wall through them.
++            add_facets(si, surfaces[si].rim);
++        }
+     }
+ 
+     std::vector<Ref> query(double xmin, double ymin, double xmax, double ymax) const
+@@ -57,6 +60,19 @@ public:
+     }
+ 
+ private:
++    void add_facets(size_t si, const std::map<int, NonplanarFacet> &facets)
++    {
++        for (const auto &entry : facets) {
++            const auto &v = entry.second.vertex;
++            const double xmin = std::min({double(v[0].x), double(v[1].x), double(v[2].x)});
++            const double xmax = std::max({double(v[0].x), double(v[1].x), double(v[2].x)});
++            const double ymin = std::min({double(v[0].y), double(v[1].y), double(v[2].y)});
++            const double ymax = std::max({double(v[0].y), double(v[1].y), double(v[2].y)});
++            for (int ix = cell(xmin); ix <= cell(xmax); ++ix)
++                for (int iy = cell(ymin); iy <= cell(ymax); ++iy)
++                    m_cells[key(ix, iy)].emplace_back(si, entry.first);
++        }
++    }
+     static int cell(double value) { return int(std::floor(value / 2.0)); }
+     static uint64_t key(int x, int y) {
+         return (uint64_t(uint32_t(x)) << 32) | uint32_t(y);
+@@ -1279,8 +1295,12 @@ void LayerRegion::simplify_loop(ExtrusionLoop* loop)
+ void
+ LayerRegion::append_nonplanar_surface(NonplanarSurface& surface)
+ {
++    // Identity, not geometry: `operator==` compares the extents only, and two
++    // different surfaces can share them (the extents are computed from the shallow
++    // facets alone).  Comparing names would silently drop the second surface and the
++    // projection would then fail to find its owner.
+     for(auto & s : m_nonplanar_surfaces){
+-        if (s == surface){
++        if (s.stable_id == surface.stable_id){
+             return;
+         }    
+     }
+@@ -1433,34 +1453,75 @@ std::vector<ExtrusionPath> LayerRegion::project_nonplanar_path(const ExtrusionPa
+     const double offset = source.distance_to_top;
+     // Perimeter centre lines may sit up to half their extrusion width beyond
+     // a mesh boundary. Use the nearest boundary height only within that width.
+-    const double margin = std::max(0.003, double(source.width) * 0.5 + 0.003);
++    // With the edge extension (PrintObject::detect_nonplanar_surfaces) a shell also
++    // covers the thin remainder between the surface boundary and the wall; it takes the
++    // nearest boundary height, i.e. continues flat outwards from the boundary.
++    const double margin = std::max(0.003, double(source.width) * 0.5 + 0.003)
++                        + nonplanar_edge_reach(this->layer()->object()->config().nonplanar_edge_fix.value);
+     const std::vector<NonplanarProjectionIndex::Ref> *candidates = nullptr;
+-    auto sample = [&](double x, double y, int &owner, int &facet_id, double &height) {
+-        double best = std::numeric_limits<double>::max();
+-        owner = -1;
+-        facet_id = -1;
++    // A facet is either a shallow target facet (`mesh`) or a rim facet kept only as a
++    // projection target.  Rim facets are the edge fillet: material next to a wall may
++    // follow them, and only they may exceed the normal nonplanar slope limit.
++    auto facet_of = [&](size_t si, int facet_id) -> const NonplanarFacet * {
++        if (si >= m_nonplanar_surfaces.size())
++            return nullptr;
++        const NonplanarSurface &surface = m_nonplanar_surfaces[si];
++        auto it = surface.mesh.find(facet_id);
++        if (it != surface.mesh.end())
++            return &it->second;
++        auto it_rim = surface.rim.find(facet_id);
++        return it_rim != surface.rim.end() ? &it_rim->second : nullptr;
++    };
++    auto sample_facet_at = [&](double x, double y, int owner, int facet_id, double &height, bool &is_rim, double &slope_deg) {
++        if (owner < 0 || facet_id < 0)
++            return false;
++        const NonplanarFacet *facet = facet_of(size_t(owner), facet_id);
++        if (facet == nullptr)
++            return false;
++        double z = 0.0, d2 = 0.0;
++        if (!nonplanar_triangle_height(*facet, x, y, margin, z, d2)) return false;
++        height   = z - offset;
++        is_rim   = m_nonplanar_surfaces[size_t(owner)].mesh.find(facet_id) == m_nonplanar_surfaces[size_t(owner)].mesh.end();
++        slope_deg = std::acos(std::max(-1.0, std::min(1.0, double(facet->normal.z)))) * 180.0 / M_PI;
++        return true;
++    };
++    auto sample = [&](double x, double y, int &owner, int &facet_id, double &height, bool &is_rim, double &slope_deg) {
++        // Shallow target facets win: a point of a normal conformal line must not be
++        // borrowed by a steeper rim facet that merely happens to be nearer in XY.  Rim
++        // facets are used only where no shallow facet covers the point, which is exactly
++        // the edge fillet next to the wall.
++        double best_fill = std::numeric_limits<double>::max();
++        double best_rim  = std::numeric_limits<double>::max();
++        int    owner_fill = -1, facet_fill = -1, owner_rim = -1, facet_rim = -1;
++        double height_fill = 0.0, height_rim = 0.0;
++        bool   rim_fill = false, rim_rim = false;
++        double slope_fill = 0.0, slope_rim = 0.0;
+         for (const auto &[si, candidate_facet_id] : *candidates) {
+-            const NonplanarSurface &surface = m_nonplanar_surfaces[si];
+-            if (surface.stable_id != source.source_surface_id)
++            if (m_nonplanar_surfaces[si].stable_id != source.source_surface_id)
++                continue;
++            const NonplanarFacet *facet = facet_of(si, candidate_facet_id);
++            if (facet == nullptr)
+                 continue;
+             double z = 0.0, d2 = 0.0;
+-            if (!nonplanar_triangle_height(surface.mesh.at(candidate_facet_id), x, y, margin, z, d2)) continue;
+-            if (d2 < best) {
+-                best = d2;
+-                owner = int(si);
+-                facet_id = candidate_facet_id;
+-                height = z - offset;
++            if (!nonplanar_triangle_height(*facet, x, y, margin, z, d2)) continue;
++            const bool rim = m_nonplanar_surfaces[si].mesh.find(candidate_facet_id) == m_nonplanar_surfaces[si].mesh.end();
++            if (rim) {
++                if (d2 < best_rim) { best_rim = d2; owner_rim = int(si); facet_rim = candidate_facet_id; height_rim = z - offset; rim_rim = true;
++                                     slope_rim = std::acos(std::max(-1.0, std::min(1.0, double(facet->normal.z)))) * 180.0 / M_PI; }
++            } else {
++                if (d2 < best_fill) { best_fill = d2; owner_fill = int(si); facet_fill = candidate_facet_id; height_fill = z - offset; rim_fill = false;
++                                      slope_fill = std::acos(std::max(-1.0, std::min(1.0, double(facet->normal.z)))) * 180.0 / M_PI; }
+             }
+         }
++        if (owner_fill >= 0) {
++            owner = owner_fill; facet_id = facet_fill; height = height_fill; is_rim = rim_fill; slope_deg = slope_fill;
++        } else {
++            owner = owner_rim; facet_id = facet_rim; height = height_rim; is_rim = rim_rim; slope_deg = slope_rim;
++        }
+     };
+     auto sample_facet = [&](double x, double y, int owner, int facet_id, double &height) {
+-        if (owner < 0 || size_t(owner) >= m_nonplanar_surfaces.size() || facet_id < 0)
+-            return false;
+-        const NonplanarSurface &surface = m_nonplanar_surfaces[size_t(owner)];
+-        double z = 0.0, d2 = 0.0;
+-        if (!nonplanar_triangle_height(surface.mesh.at(facet_id), x, y, margin, z, d2)) return false;
+-        height = z - offset;
+-        return true;
++        bool is_rim = false; double slope = 0.0;
++        return sample_facet_at(x, y, owner, facet_id, height, is_rim, slope);
+     };
+     auto point_at = [&](const Point3 &a, const Point3 &b, double t, int owner, int facet_id, double inside_t) {
+         double use_t = t;
+@@ -1519,7 +1580,9 @@ std::vector<ExtrusionPath> LayerRegion::project_nonplanar_path(const ExtrusionPa
+         candidates = &nearby;
+         std::vector<double> ts{0.0, 1.0};
+         for (const auto &[si, facet_id] : nearby) {
+-                const auto &f = m_nonplanar_surfaces[si].mesh.at(facet_id);
++                const NonplanarFacet *facet_ptr = facet_of(si, facet_id);
++                if (facet_ptr == nullptr) continue;
++                const auto &f = *facet_ptr;
+                 for (int e = 0; e < 3; ++e) {
+                     const auto &v = f.vertex[e], &w = f.vertex[(e+1)%3];
+                     const double ex = w.x-v.x, ey = w.y-v.y;
+@@ -1532,13 +1595,25 @@ std::vector<ExtrusionPath> LayerRegion::project_nonplanar_path(const ExtrusionPa
+                         ts.push_back(t);
+                 }
+         }
++        // Edge extension: beyond the mesh boundary a line crosses no facet edge, so one
++        // long interval would take the facet nearest to its middle, and both ends,
++        // farther than the margin from that facet, would be clipped towards the middle:
++        // the piece shrinks or vanishes (notches in the outer line).  Short intervals let
++        // every piece take its own nearest boundary facet.
++        if (nonplanar_edge_reach(this->layer()->object()->config().nonplanar_edge_fix.value) > 0.) {
++            const double len = std::hypot(dx, dy);
++            const int    n   = int(std::ceil(len / 0.2));
++            for (int k = 1; k < n; ++k) ts.push_back(double(k) / n);
++        }
+         std::sort(ts.begin(), ts.end());
+         ts.erase(std::unique(ts.begin(), ts.end(), [](double u, double v) { return std::abs(u-v) < 1e-7; }), ts.end());
+         for (size_t j = 1; j < ts.size(); ++j) {
+             const double mid = 0.5*(ts[j-1]+ts[j]);
+             int owner = -1, facet_id = -1;
+             double height = 0.0;
+-            sample(ax+mid*dx, ay+mid*dy, owner, facet_id, height);
++            bool   on_rim = false;
++            double facet_slope = 0.0;
++            sample(ax+mid*dx, ay+mid*dy, owner, facet_id, height, on_rim, facet_slope);
+             if (owner < 0)
+                 // No planar substitute: the interval would be printed at the
+                 // nominal home-layer height, beside or inside other material.
+@@ -1555,12 +1630,19 @@ std::vector<ExtrusionPath> LayerRegion::project_nonplanar_path(const ExtrusionPa
+                 const double xy = std::hypot(unscale<double>(p1.x() - p0.x()),
+                                              unscale<double>(p1.y() - p0.y()));
+                 const double dz = std::abs(unscale<double>(p1.z() - p0.z()));
+-                if (dz > std::tan(12.0 * M_PI / 180.0) * xy + 0.03)
++                // The slope limit belongs to the surface the segment was projected onto,
++                // not to the path: a line on the shallow target surface keeps the normal
++                // limit, and only material that follows the edge fillet (rim facet) may be
++                // steeper.  The same number travels with the path so the final G-code
++                // check cannot silently disagree with this one.
++                const double max_deg = on_rim ? std::min(facet_slope, double(NONPLANAR_EDGE_MAX_ANGLE)) : 12.0;
++                if (dz > std::tan(max_deg * M_PI / 180.0) * xy + 0.03)
+                     throw_nonplanar_too_steep(unscale<double>(std::max(p0.z(), p1.z())), this->layer()->id(),
+                         this->layer()->object()->config().nonplanar_layers_angle.value, this->layer()->object()->id().id,
+                         "projected segment X" + std::to_string(unscale<double>(p0.x())) + " Y" + std::to_string(unscale<double>(p0.y())) +
+                         " -> X" + std::to_string(unscale<double>(p1.x())) + " Y" + std::to_string(unscale<double>(p1.y())) +
+                         ", XY " + std::to_string(xy) + " mm, Z " + std::to_string(dz) + " mm, surface " + std::to_string(owner));
++                current.max_slope_deg = std::max(current.max_slope_deg, float(max_deg));
+             }
+             // Preserve short real segments.  A seam belongs to a different
+             // surface owner or has a different XYZ endpoint and is handled
+diff --git a/src/libslic3r/NonplanarFacet.hpp b/src/libslic3r/NonplanarFacet.hpp
+index c38d5add..e91f1210 100644
+--- a/src/libslic3r/NonplanarFacet.hpp
++++ b/src/libslic3r/NonplanarFacet.hpp
+@@ -25,6 +25,11 @@ class NonplanarFacet
+     int neighbor[3];
+     facet_stats stats;
+     bool marked = false;
++    // OrcaSlicer Nonplanar edge-ring prototype: this facet is steeper than the
++    // configured nonplanar angle (fillet next to a wall).  It is kept in the
++    // surface mesh only so the edge ring line can be projected onto it; fills
++    // and strips ignore it (see NonplanarSurface::horizontal_projection()).
++    bool rim = false;
+ 
+     NonplanarFacet() {};
+     ~NonplanarFacet() {};
+diff --git a/src/libslic3r/NonplanarIroning.cpp b/src/libslic3r/NonplanarIroning.cpp
+new file mode 100644
+index 00000000..6282cfa8
+--- /dev/null
++++ b/src/libslic3r/NonplanarIroning.cpp
+@@ -0,0 +1,296 @@
++// Nonplanar ironing: a very low flow pass over the visible conformal shell
++// (distance_to_top == 0) that follows the surface.
++//
++// The flat nozzle tip must never go below the surface.  Centred on a slope its
++// uphill edge would dig in by r * tan(slope) (0.12 mm at 12 deg with the A1 mini
++// tip), so every point of a line is lifted to the highest surface point under
++// the tip disk (NonplanarTipHeight.hpp, exact).  On a slope only the uphill edge
++// touches; the lines run along the surface's contour so that edge keeps a
++// constant contact, and parts steeper than nonplanar_ironing_max_angle are left
++// out.  nonplanar_ironing_slope_press lowers the tip on a slope by a share of
++// the gap under its middle (at most 0.05 mm) so the slopes are pressed too.
++// The ironing area is the top shell inset by the tip radius, so the disk
++// never reaches past the surface (a raised letter, a wall).
++//
++// The paths are conformal (nonplanar_source) and carry their absolute heights;
++// they are added after the projection step and printed with the other ironing
++// of the island, i.e. after the shell they iron.  The deposition planner sees
++// them like any other conformal path.
++
++#include "Layer.hpp"
++#include "ClipperUtils.hpp"
++#include "ExtrusionEntity.hpp"
++#include "ExtrusionEntityCollection.hpp"
++#include "Fill/FillBase.hpp"
++#include "Flow.hpp"
++#include "NonplanarSchedule.hpp"
++#include "NonplanarSurface.hpp"
++#include "NonplanarTipHeight.hpp"
++#include "Print.hpp"
++
++#include <boost/log/trivial.hpp>
++
++#include <cmath>
++#include <cstdlib>
++#include <iostream>
++#include <map>
++#include <memory>
++#include <mutex>
++#include <unordered_map>
++#include <vector>
++
++namespace Slic3r {
++
++namespace {
++
++// Facets of one surface (mesh + rim) on a coarse grid, for the disk queries.
++class TipFacetGrid {
++public:
++    explicit TipFacetGrid(const NonplanarSurface &surface)
++    {
++        for (const auto *facets : { &surface.mesh, &surface.rim })
++            for (const auto &entry : *facets)
++                add(&entry.second);
++    }
++
++    // Highest surface point under the disk (exact over the facets that reach it).
++    NonplanarTip::Result tip_height(double cx, double cy, double r) const
++    {
++        NonplanarTip::Result res;
++        for (int ix = cell(cx - r); ix <= cell(cx + r); ++ ix)
++            for (int iy = cell(cy - r); iy <= cell(cy + r); ++ iy) {
++                const auto it = m_cells.find(key(ix, iy));
++                if (it == m_cells.end())
++                    continue;
++                for (const NonplanarFacet *f : it->second) {
++                    double z, slope;
++                    if (NonplanarTip::facet_max_in_disk(*f, cx, cy, r, z, slope) && z > res.z) {
++                        res.found = true; res.z = z; res.slope_deg = slope;
++                    }
++                }
++            }
++        return res;
++    }
++
++    // Surface height at a single point (for the verification only).
++    bool height_at(double x, double y, double &z) const
++    {
++        bool found = false;
++        const auto it = m_cells.find(key(cell(x), cell(y)));
++        if (it == m_cells.end())
++            return false;
++        for (const NonplanarFacet *f : it->second) {
++            double zz, slope;
++            if (NonplanarTip::facet_max_in_disk(*f, x, y, 1e-6, zz, slope) && (! found || zz > z)) {
++                z = zz; found = true;
++            }
++        }
++        return found;
++    }
++
++private:
++    void add(const NonplanarFacet *f)
++    {
++        const auto &v = f->vertex;
++        const double xmin = std::min({ double(v[0].x), double(v[1].x), double(v[2].x) });
++        const double xmax = std::max({ double(v[0].x), double(v[1].x), double(v[2].x) });
++        const double ymin = std::min({ double(v[0].y), double(v[1].y), double(v[2].y) });
++        const double ymax = std::max({ double(v[0].y), double(v[1].y), double(v[2].y) });
++        for (int ix = cell(xmin); ix <= cell(xmax); ++ ix)
++            for (int iy = cell(ymin); iy <= cell(ymax); ++ iy)
++                m_cells[key(ix, iy)].push_back(f);
++    }
++    static int cell(double v) { return int(std::floor(v / 2.0)); }
++    static uint64_t key(int x, int y) { return (uint64_t(uint32_t(x)) << 32) | uint32_t(y); }
++    std::unordered_map<uint64_t, std::vector<const NonplanarFacet*>> m_cells;
++};
++
++// Line direction along the surface's contour: perpendicular to the area-weighted
++// mean slope direction of the shallow facets.  Returns false for a (nearly)
++// flat or symmetric surface, where the normal ironing angle is used.
++bool contour_angle(const NonplanarSurface &surface, double &angle)
++{
++    double sx = 0., sy = 0., area = 0.;
++    for (const auto &entry : surface.mesh) {
++        const NonplanarFacet &f = entry.second;
++        const auto &v = f.vertex;
++        const double ux = v[1].x - v[0].x, uy = v[1].y - v[0].y, wx = v[2].x - v[0].x, wy = v[2].y - v[0].y;
++        const double a = 0.5 * std::abs(ux * wy - uy * wx);
++        sx += a * f.normal.x; sy += a * f.normal.y; area += a;
++    }
++    if (area <= 0.)
++        return false;
++    sx /= area; sy /= area;
++    // Mean slope below about 1 degree: no preferred direction.
++    if (std::hypot(sx, sy) < 0.017)
++        return false;
++    angle = std::atan2(sy, sx) + 0.5 * M_PI;
++    return true;
++}
++
++bool ironing_verify() { static const bool v = std::getenv("NONPLANAR_IRONING_VERIFY") != nullptr; return v; }
++
++} // namespace
++
++void Layer::make_nonplanar_ironing()
++{
++    const PrintObjectConfig &object_config = this->object()->config();
++    if (! object_config.use_nonplanar_layers.value || ! object_config.nonplanar_ironing.value)
++        return;
++
++    const double tip_r     = NonplanarClearanceModel().tip_radius_mm;
++    const double spacing   = object_config.nonplanar_ironing_spacing.value;
++    const double max_angle = object_config.nonplanar_ironing_max_angle.value;
++    const double z_offset  = object_config.nonplanar_ironing_z_offset.value;
++    // Share of the gap under the middle of the tip (r * tan(slope) on a plane) that is pressed away.
++    // The gap is measured, not taken from the facet slope: it changes smoothly along a line, while
++    // the slope of the facet that holds the tip jumps from facet to facet.
++    const double press     = 0.01 * object_config.nonplanar_ironing_slope_press.value;
++    const double press_max = 0.05;  // mm
++    const double step      = 0.1;   // sampling along a line (mm)
++    const double min_len   = 1.0;   // shorter pieces are dropped (mm)
++
++    for (LayerRegion *layerm : m_regions) {
++        const NonplanarSurfaces &surfaces = layerm->nonplanar_surfaces();
++        if (surfaces.empty())
++            continue;
++        // Visible shell of each target surface in this (home) layer.
++        std::map<int, ExPolygons> top_by_surface;
++        for (const Surface &s : layerm->slices.surfaces)
++            if (s.surface_type == stTopNonplanar && s.distance_to_top >= 0.f && s.distance_to_top < 1e-4f && s.source_surface_id >= 0)
++                top_by_surface[s.source_surface_id].push_back(s.expolygon);
++        if (top_by_surface.empty())
++            continue;
++
++        const PrintRegionConfig &region_config = layerm->region().config();
++        const int    extruder   = region_config.top_surface_filament_id.value;
++        const double nozzle_dmr = this->object()->print()->config().nozzle_diameter.get_at(std::max(0, extruder - 1));
++        // Same flow model as the planar ironing (Layer::make_ironing).
++        const double height            = object_config.layer_height.value * 0.01 * object_config.nonplanar_ironing_flow.value;
++        const double extrusion_height  = height * spacing / nozzle_dmr;
++        const float  extrusion_width   = Flow::rounded_rectangle_extrusion_width_from_spacing(float(nozzle_dmr), float(extrusion_height));
++        const double flow_mm3_per_mm   = nozzle_dmr * extrusion_height;
++
++        for (auto &[surface_id, area] : top_by_surface) {
++            const NonplanarSurface *surface = nullptr;
++            for (const NonplanarSurface &s : surfaces)
++                if (s.stable_id == surface_id) { surface = &s; break; }
++            if (surface == nullptr)
++                continue;
++            // Keep the whole tip disk on this surface.
++            const ExPolygons iron_area = offset_ex(union_ex(area), -float(scale_(tip_r + 0.05)));
++            if (iron_area.empty())
++                continue;
++
++            double angle = 0.;
++            if (! contour_angle(*surface, angle))
++                angle = region_config.ironing_angle.value * M_PI / 180.;
++
++            std::unique_ptr<Fill> f(Fill::new_from_type(ipRectilinear));
++            f->set_bounding_box(this->object()->bounding_box());
++            f->layer_id        = this->id();
++            f->z               = this->print_z;
++            f->overlap         = 0;
++            f->spacing         = spacing;
++            f->angle           = float(angle);
++            f->fixed_angle     = true;
++            f->link_max_length = coord_t(scale_(3. * spacing));
++            FillParams fill_params;
++            fill_params.density   = 1.;
++            fill_params.monotonic = true;
++
++            const TipFacetGrid grid(*surface);
++            size_t points = 0, skipped = 0;
++            double min_clearance = std::numeric_limits<double>::max();
++            ExtrusionPaths paths;
++
++            auto flush = [&](Polyline3 &piece) {
++                double len = 0.;
++                for (size_t i = 1; i < piece.points.size(); ++ i)
++                    len += std::hypot(unscale<double>(piece.points[i].x() - piece.points[i - 1].x()), unscale<double>(piece.points[i].y() - piece.points[i - 1].y()));
++                if (piece.points.size() >= 2 && len >= min_len) {
++                    ExtrusionPath path(erIroning, flow_mm3_per_mm, extrusion_width, float(extrusion_height));
++                    path.polyline          = std::move(piece);
++                    path.nonplanar_source  = true;
++                    path.distance_to_top   = 0.f;
++                    path.source_layer_id   = this->id();
++                    path.source_surface_id = surface_id;
++                    path.source_path_id    = next_nonplanar_path_id();
++                    paths.emplace_back(std::move(path));
++                }
++                piece = Polyline3();
++            };
++
++            // Optional second pass across the first one.
++            std::vector<double> pass_angles{ angle };
++            if (object_config.nonplanar_ironing_cross.value)
++                pass_angles.push_back(angle + 0.5 * M_PI);
++            for (const double pass_angle : pass_angles)
++            for (const ExPolygon &expoly : iron_area) {
++                f->angle = float(pass_angle);
++                Surface surface_fill(stTop, expoly);
++                Polylines polylines;
++                try {
++                    polylines = f->fill_surface(&surface_fill, fill_params);
++                } catch (InfillFailedException &) {
++                }
++                for (const Polyline &pl : polylines) {
++                    Polyline3 piece;
++                    for (size_t i = 1; i < pl.points.size(); ++ i) {
++                        const Vec2d a(unscale<double>(pl.points[i - 1].x()), unscale<double>(pl.points[i - 1].y()));
++                        const Vec2d b(unscale<double>(pl.points[i].x()), unscale<double>(pl.points[i].y()));
++                        const double len = (b - a).norm();
++                        const int    n   = std::max(1, int(std::ceil(len / step)));
++                        for (int k = (i == 1 ? 0 : 1); k <= n; ++ k) {
++                            const Vec2d p = a + (b - a) * (double(k) / n);
++                            const NonplanarTip::Result tip = grid.tip_height(p.x(), p.y(), tip_r);
++                            ++ points;
++                            if (! tip.found || tip.slope_deg > max_angle + 1e-6) {
++                                ++ skipped;
++                                flush(piece);
++                                continue;
++                            }
++                            double centre_z, gap = 0.;
++                            if (press > 0. && grid.height_at(p.x(), p.y(), centre_z))
++                                gap = std::max(0., tip.z - centre_z);
++                            const double z = tip.z + z_offset - std::min(press_max, press * gap);
++                            if (ironing_verify()) {
++                                // Independent check: dense samples of the disk.
++                                double highest = -std::numeric_limits<double>::max();
++                                for (int u = -20; u <= 20; ++ u)
++                                    for (int v = -20; v <= 20; ++ v) {
++                                        const double dx = tip_r * u / 20., dy = tip_r * v / 20.;
++                                        if (dx * dx + dy * dy > tip_r * tip_r) continue;
++                                        double hz;
++                                        if (grid.height_at(p.x() + dx, p.y() + dy, hz)) highest = std::max(highest, hz);
++                                    }
++                                if (highest > -1e30)
++                                    min_clearance = std::min(min_clearance, z - highest);
++                            }
++                            piece.points.emplace_back(coord_t(scale_(p.x())), coord_t(scale_(p.y())), coord_t(scale_(z)));
++                        }
++                    }
++                    flush(piece);
++                }
++            }
++
++            if (ironing_verify()) {
++                static std::mutex log_mutex;
++                std::lock_guard<std::mutex> lock(log_mutex);
++                std::cerr << "[IRON] layer " << this->id() << " z " << this->print_z << " surface " << surface_id
++                          << " passes " << pass_angles.size() << " paths " << paths.size() << " points " << points << " skipped " << skipped
++                          << " min_clearance " << (min_clearance < 1e30 ? min_clearance : 0.) << std::endl;
++            }
++            if (! paths.empty()) {
++                ExtrusionEntityCollection *eec = new ExtrusionEntityCollection();
++                // Monotonic like the planar ironing; the lines are already ordered.
++                eec->no_sort = true;
++                for (ExtrusionPath &path : paths)
++                    eec->entities.push_back(new ExtrusionPath(std::move(path)));
++                layerm->fills.entities.push_back(eec);
++            }
++        }
++    }
++}
++
++} // namespace Slic3r
+diff --git a/src/libslic3r/NonplanarSurface.cpp b/src/libslic3r/NonplanarSurface.cpp
+index 03ddaf8f..5938c3e7 100644
+--- a/src/libslic3r/NonplanarSurface.cpp
++++ b/src/libslic3r/NonplanarSurface.cpp
+@@ -1,7 +1,11 @@
+ #include "NonplanarSurface.hpp"
+ #include "Exception.hpp"
+ 
++#include <algorithm>
++#include <cmath>
+ #include <cstdio>
++#include <cstdlib>
++#include <cstring>
+ #include <boost/log/trivial.hpp>
+ 
+ namespace Slic3r {
+@@ -33,6 +37,11 @@ NonplanarSurface::calculate_stats()
+     this->stats.max.y = -10000000;
+     this->stats.max.z = -10000000;
+     for(auto& facet : this->mesh) {
++        // Edge-ring prototype: rim facets only exist so the extra ring can be
++        // projected onto the steeper edge.  They must not change the surface's
++        // extents (home-layer choice, max-height and area checks, shell offsets).
++        if (facet.second.rim)
++            continue;
+         this->stats.min.x = std::min(this->stats.min.x, facet.second.stats.min.x);
+         this->stats.min.y = std::min(this->stats.min.y, facet.second.stats.min.y);
+         this->stats.min.z = std::min(this->stats.min.z, facet.second.stats.min.z);
+@@ -205,6 +214,9 @@ NonplanarSurface::check_surface_area()
+     //calculate surface area of nonplanar surface.
+     float area = 0.0f;
+     for(auto& facet : this->mesh) {
++        // See calculate_stats(): rim facets are projection targets only.
++        if (facet.second.rim)
++            continue;
+         area += facet.second.calculate_surface_area();
+     }
+     if (area < 20.0f) {
+@@ -223,24 +235,91 @@ NonplanarSurface::check_printable_surfaces(float max_angle)
+ 
+ /* this will return scaled ExPolygons */
+ ExPolygons
+-NonplanarSurface::horizontal_projection() const
++NonplanarSurface::horizontal_projection(Projection kind) const
+ {
+     Polygons pp;
+-    pp.reserve(this->mesh.size());
+-    for(auto& facet : this->mesh) {
+-        Polygon p;
+-        p.points.resize(3);
+-        p.points[0] = Point(scale_(facet.second.vertex[0].x), scale_(facet.second.vertex[0].y));
+-        p.points[1] = Point(scale_(facet.second.vertex[1].x), scale_(facet.second.vertex[1].y));
+-        p.points[2] = Point(scale_(facet.second.vertex[2].x), scale_(facet.second.vertex[2].y));
+-        p.make_counter_clockwise();  // do this after scaling, as winding order might change while doing that
+-        pp.push_back(p);
+-    }
++    pp.reserve(this->mesh.size() + this->rim.size());
++    auto append = [&pp](const std::map<int, NonplanarFacet> &facets) {
++        for (auto &facet : facets) {
++            Polygon p;
++            p.points.resize(3);
++            p.points[0] = Point(scale_(facet.second.vertex[0].x), scale_(facet.second.vertex[0].y));
++            p.points[1] = Point(scale_(facet.second.vertex[1].x), scale_(facet.second.vertex[1].y));
++            p.points[2] = Point(scale_(facet.second.vertex[2].x), scale_(facet.second.vertex[2].y));
++            p.make_counter_clockwise();  // do this after scaling, as winding order might change while doing that
++            pp.push_back(p);
++        }
++    };
++    append(this->mesh);
++    if (kind == Projection::Target)
++        append(this->rim);
+ 
+     // the offset factor was tuned using groovemount.stl
+     return union_ex(offset(pp, scale_(0.01)));
+ }
+ 
++bool
++NonplanarSurface::height_near(double x, double y, double max_dist, double &z) const
++{
++    double best = max_dist * max_dist;
++    bool   found = false;
++    for (const auto &entry : this->mesh) {
++        const NonplanarFacet &f = entry.second;
++        if (x < f.stats.min.x - max_dist || x > f.stats.max.x + max_dist ||
++            y < f.stats.min.y - max_dist || y > f.stats.max.y + max_dist)
++            continue;
++        const auto &a = f.vertex[0], &b = f.vertex[1], &c = f.vertex[2];
++        const double den = (b.y-a.y)*(c.x-a.x) - (b.x-a.x)*(c.y-a.y);
++        if (std::abs(den) > 1e-12) {
++            const double w1 = ((y-a.y)*(c.x-a.x) - (x-a.x)*(c.y-a.y)) / den;
++            const double w2 = ((b.y-a.y)*(x-a.x) - (b.x-a.x)*(y-a.y)) / den;
++            const double w0 = 1.0 - w1 - w2;
++            if (w0 >= -1e-7 && w1 >= -1e-7 && w2 >= -1e-7) {
++                z = w0*a.z + w1*b.z + w2*c.z;
++                return true;
++            }
++        }
++        for (int i = 0; i < 3; ++ i) {
++            const auto &p = f.vertex[i], &q = f.vertex[(i+1)%3];
++            const double dx = q.x-p.x, dy = q.y-p.y, len2 = dx*dx + dy*dy;
++            if (len2 < 1e-12) continue;
++            const double t  = std::max(0.0, std::min(1.0, ((x-p.x)*dx + (y-p.y)*dy) / len2));
++            const double ex = x-p.x-t*dx, ey = y-p.y-t*dy, d2 = ex*ex + ey*ey;
++            if (d2 <= best) {
++                best  = d2;
++                z     = p.z + t*(q.z-p.z);
++                found = true;
++            }
++        }
++    }
++    return found;
++}
++
++double nonplanar_edge_reach(bool enabled)
++{
++    // The environment is a test hook only: NONPLANAR_EDGE_RING=0 forces the fix off,
++    // =1 forces it on regardless of the setting.  Both are read once; the setting
++    // itself is evaluated on every call, so it follows the object's config live.
++    static const int env_mode = []() {
++        const char *on = std::getenv("NONPLANAR_EDGE_RING");
++        if (on != nullptr && std::strcmp(on, "0") == 0)
++            return 0;   // forced off
++        if (on != nullptr && std::strcmp(on, "1") == 0)
++            return 1;   // forced on
++        return -1;      // follow the setting
++    }();
++    static const double env_reach = []() {
++        const char  *v = std::getenv("NONPLANAR_EDGE_REACH");
++        const double r = v != nullptr ? std::atof(v) : 0.0;
++        return (r > 0.05 && r <= 3.0) ? r : 1.0;
++    }();
++    if (env_mode == 0)
++        return 0.0;
++    if (env_mode < 0 && !enabled)
++        return 0.0;
++    return env_reach;
++}
++
+ std::string nonplanar_location(double z, size_t layer_id)
+ {
+     char buf[80];
+diff --git a/src/libslic3r/NonplanarSurface.hpp b/src/libslic3r/NonplanarSurface.hpp
+index ef21d42a..c38ee08e 100644
+--- a/src/libslic3r/NonplanarSurface.hpp
++++ b/src/libslic3r/NonplanarSurface.hpp
+@@ -29,7 +29,18 @@ typedef std::vector<NonplanarSurface> NonplanarSurfaces;
+ class NonplanarSurface
+ {
+     public:
++    // What a horizontal projection is used for.  Rim facets (the steeper fillet
++    // between the target surface and a wall) must be part of the area a conformal
++    // strip may cover -- that is what lets the strip reach the wall with the model's
++    // own outline -- but they must not change the surface's extents, area or home
++    // layer, which stay defined by the shallow facets alone.
++    enum class Projection {
++        Area,     // shallow facets only: stats, area / height checks
++        Target,   // shallow + rim: strip generation, collision check
++    };
+     std::map<int, NonplanarFacet> mesh;
++    // Facets kept only as projection targets (slope above the nonplanar angle).
++    std::map<int, NonplanarFacet> rim;
+     mesh_stats stats;
+     int stable_id = -1;
+     NonplanarSurface() {};
+@@ -47,7 +58,10 @@ class NonplanarSurface
+     bool check_max_printing_height(float height);
+     void check_printable_surfaces(float max_angle);
+     bool check_surface_area();
+-    ExPolygons horizontal_projection() const;
++    ExPolygons horizontal_projection(Projection kind = Projection::Target) const;
++    // Height of the target surface at (x, y), or of its nearest boundary point when
++    // (x, y) lies outside the surface but within max_dist (unscaled mm).
++    bool height_near(double x, double y, double max_dist, double &z) const;
+ 
+ };
+ 
+@@ -56,6 +70,11 @@ class NonplanarSurface
+ // goes to the log and, for internal checks, in short into the message.
+ // " at height 8.40 mm (layer 43)"; layer_id is 0-based.
+ std::string nonplanar_location(double z, size_t layer_id);
++// Edge extension (setting "Nonplanar edge fix", on by default; NONPLANAR_EDGE_RING=0/1
++// forces it off/on for tests): how far (mm) beyond the target surface a nonplanar shell
++// may take over the thin planar remainder next to the wall, so the shell's outer line
++// runs on the model's own outline.  Returns 0 when `enabled` is false.  0 = off.
++double      nonplanar_edge_reach(bool enabled);
+ // Angle to suggest after a failure at `angle` (12 -> 10).
+ double      nonplanar_suggested_angle(double angle);
+ // A surface step a nonplanar line cannot follow (steeper than 12 degrees).
+diff --git a/src/libslic3r/NonplanarTipHeight.hpp b/src/libslic3r/NonplanarTipHeight.hpp
+new file mode 100644
+index 00000000..d79ce71f
+--- /dev/null
++++ b/src/libslic3r/NonplanarTipHeight.hpp
+@@ -0,0 +1,134 @@
++// Nonplanar ironing: height of the flat nozzle tip so that no part of the tip
++// disk goes below the surface ("drop cutter" with a flat end mill).
++//
++// Header-only and independent of the rest of libslic3r.  `Facet` must provide
++// `vertex[3]` with float members x, y, z, as Slic3r::NonplanarFacet does.
++// NonplanarIroning.cpp calls it with the facets of one NonplanarSurface
++// (mesh + rim) that lie under the tip disk.
++#pragma once
++
++#include <algorithm>
++#include <cmath>
++#include <limits>
++
++namespace Slic3r {
++namespace NonplanarTip {
++
++struct Result {
++    bool   found     = false;
++    double z         = -std::numeric_limits<double>::max(); // highest surface point under the disk
++    double slope_deg = 0.;                                    // slope of the facet that gave it
++};
++
++namespace detail {
++
++struct P2 { double x, y; };
++
++// Plane of a triangle: z = a*x + b*y + c.  False for (near) vertical facets,
++// which have no height over an area; their top edge is shared with a
++// neighbour that does.
++template<class Facet>
++inline bool plane_of(const Facet &f, double &a, double &b, double &c)
++{
++    const double x0 = f.vertex[0].x, y0 = f.vertex[0].y, z0 = f.vertex[0].z;
++    const double x1 = f.vertex[1].x, y1 = f.vertex[1].y, z1 = f.vertex[1].z;
++    const double x2 = f.vertex[2].x, y2 = f.vertex[2].y, z2 = f.vertex[2].z;
++    const double ux = x1 - x0, uy = y1 - y0, uz = z1 - z0;
++    const double vx = x2 - x0, vy = y2 - y0, vz = z2 - z0;
++    const double nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
++    const double len = std::sqrt(nx * nx + ny * ny + nz * nz);
++    if (len <= 0. || std::abs(nz) < 1e-6 * len)
++        return false;
++    a = -nx / nz; b = -ny / nz; c = z0 - a * x0 - b * y0;
++    return true;
++}
++
++inline bool inside_triangle(const P2 t[3], double x, double y, double eps)
++{
++    auto cross = [](const P2 &p, const P2 &q, double x, double y) {
++        return (q.x - p.x) * (y - p.y) - (q.y - p.y) * (x - p.x);
++    };
++    const double d0 = cross(t[0], t[1], x, y), d1 = cross(t[1], t[2], x, y), d2 = cross(t[2], t[0], x, y);
++    const bool neg = d0 < -eps || d1 < -eps || d2 < -eps;
++    const bool pos = d0 >  eps || d1 >  eps || d2 >  eps;
++    return !(neg && pos);
++}
++
++} // namespace detail
++
++// Highest point of one facet within the disk (cx, cy, r).  Exact: a plane's
++// maximum over the convex set triangle ∩ disk lies at one of its extreme
++// points -- a triangle vertex inside the disk, an edge/circle crossing, or the
++// circle point in the plane's uphill direction when that point is inside the
++// triangle.
++template<class Facet>
++inline bool facet_max_in_disk(const Facet &f, double cx, double cy, double r, double &zmax, double &slope_deg)
++{
++    using namespace detail;
++    double a, b, c;
++    if (!plane_of(f, a, b, c))
++        return false;
++    const P2 t[3] = { { f.vertex[0].x, f.vertex[0].y }, { f.vertex[1].x, f.vertex[1].y }, { f.vertex[2].x, f.vertex[2].y } };
++    const double r2 = r * r;
++    bool   any  = false;
++    double best = -std::numeric_limits<double>::max();
++    auto take = [&](double x, double y) { best = std::max(best, a * x + b * y + c); any = true; };
++
++    for (const P2 &v : t)
++        if ((v.x - cx) * (v.x - cx) + (v.y - cy) * (v.y - cy) <= r2)
++            take(v.x, v.y);
++    for (int i = 0; i < 3; ++i) {
++        const P2 &p = t[i], &q = t[(i + 1) % 3];
++        const double dx = q.x - p.x, dy = q.y - p.y;
++        const double A = dx * dx + dy * dy;
++        if (A <= 0.)
++            continue;
++        const double B = 2. * (dx * (p.x - cx) + dy * (p.y - cy));
++        const double C = (p.x - cx) * (p.x - cx) + (p.y - cy) * (p.y - cy) - r2;
++        const double disc = B * B - 4. * A * C;
++        if (disc < 0.)
++            continue;
++        const double s = std::sqrt(disc);
++        for (double u : { (-B - s) / (2. * A), (-B + s) / (2. * A) })
++            if (u >= 0. && u <= 1.)
++                take(p.x + u * dx, p.y + u * dy);
++    }
++    const double g = std::sqrt(a * a + b * b);
++    const double ux = g > 1e-12 ? a / g : 0., uy = g > 1e-12 ? b / g : 0.;
++    if (inside_triangle(t, cx + r * ux, cy + r * uy, 1e-12))
++        take(cx + r * ux, cy + r * uy);
++    // Disk entirely inside the triangle and the plane flat: the centre.
++    if (!any && inside_triangle(t, cx, cy, 1e-12))
++        take(cx, cy);
++    if (!any)
++        return false;
++    zmax      = best;
++    slope_deg = std::atan(g) * 180. / M_PI;
++    return true;
++}
++
++// Tip height over the disk (cx, cy, tip_radius) for the given facets.  Facets
++// whose XY bounding box misses the disk are skipped cheaply, so the caller may
++// pass the candidate list of a coarse grid.  The result is the surface height
++// the tip may touch; the caller adds the press offset (<= 0 presses down).
++template<class FacetRange>
++inline Result tip_height(const FacetRange &facets, double cx, double cy, double tip_radius)
++{
++    Result res;
++    for (const auto &f : facets) {
++        const double xmin = std::min({ double(f.vertex[0].x), double(f.vertex[1].x), double(f.vertex[2].x) });
++        const double xmax = std::max({ double(f.vertex[0].x), double(f.vertex[1].x), double(f.vertex[2].x) });
++        const double ymin = std::min({ double(f.vertex[0].y), double(f.vertex[1].y), double(f.vertex[2].y) });
++        const double ymax = std::max({ double(f.vertex[0].y), double(f.vertex[1].y), double(f.vertex[2].y) });
++        if (xmax < cx - tip_radius || xmin > cx + tip_radius || ymax < cy - tip_radius || ymin > cy + tip_radius)
++            continue;
++        double z, slope;
++        if (facet_max_in_disk(f, cx, cy, tip_radius, z, slope) && z > res.z) {
++            res.found = true; res.z = z; res.slope_deg = slope;
++        }
++    }
++    return res;
++}
++
++} // namespace NonplanarTip
++} // namespace Slic3r
+diff --git a/src/libslic3r/Preset.cpp b/src/libslic3r/Preset.cpp
+index 1b415732..84819b06 100644
+--- a/src/libslic3r/Preset.cpp
++++ b/src/libslic3r/Preset.cpp
+@@ -1299,7 +1299,8 @@ static std::vector<std::string> s_Preset_print_options{
+     "interlocking_beam_width",
+     "calib_flowrate_topinfill_special_order",
+     // Nonplanar top shells
+-    "use_nonplanar_layers", "nonplanar_layers_angle", "nonplanar_layers_height",
++    "use_nonplanar_layers", "nonplanar_layers_angle", "nonplanar_layers_height", "nonplanar_edge_fix",
++    "nonplanar_ironing", "nonplanar_ironing_flow", "nonplanar_ironing_spacing", "nonplanar_ironing_max_angle", "nonplanar_ironing_z_offset", "nonplanar_ironing_slope_press", "nonplanar_ironing_cross",
+     "set_nonplanar_top_surface_flow_ratio", "nonplanar_top_surface_flow_ratio",
+     "set_nonplanar_top_surface_direction", "nonplanar_top_surface_direction",
+     // Z Anti-Aliasing (ZAA)
+diff --git a/src/libslic3r/PrintConfig.cpp b/src/libslic3r/PrintConfig.cpp
+index f8e887fa..01caa480 100644
+--- a/src/libslic3r/PrintConfig.cpp
++++ b/src/libslic3r/PrintConfig.cpp
+@@ -4407,6 +4407,87 @@ void PrintConfigDef::init_fff_params()
+     // Bambu Lab A1 mini: 5 mm height span.
+     def->set_default_value(new ConfigOptionFloat(5.0));
+ 
++    def = this->add("nonplanar_edge_fix", coBool);
++    def->label = L("Extend nonplanar shell to the edge");
++    def->category = L("Quality");
++    def->tooltip = L("Where the nonplanar top shell stops short of the outer wall (a steep edge or fillet), "
++                     "the thin planar strip left between the shell and the wall is printed as part of the shell, "
++                     "so the shell's outer line follows the model's outline without notches. "
++                     "Where the shell already reaches the wall nothing is changed.");
++    def->mode = comAdvanced;
++    def->set_default_value(new ConfigOptionBool(true));
++
++    // Nonplanar ironing: the flat nozzle tip is placed on the highest surface point
++    // under it, so on a slope only its uphill edge touches and nothing is gouged.
++    def = this->add("nonplanar_ironing", coBool);
++    def->label = L("Nonplanar ironing");
++    def->category = L("Quality");
++    def->tooltip = L("Iron the visible nonplanar top shell along the surface with a very low flow. "
++                     "The nozzle tip never goes below the surface: on a slope only its uphill edge touches.");
++    def->mode = comAdvanced;
++    def->set_default_value(new ConfigOptionBool(false));
++
++    def = this->add("nonplanar_ironing_flow", coPercent);
++    def->label = L("Nonplanar ironing flow");
++    def->category = L("Quality");
++    def->tooltip = L("The amount of material to extrude during nonplanar ironing, relative to the flow of the normal layer height.");
++    def->sidetext = "%";
++    def->ratio_over = "layer_height";
++    def->min = 0;
++    def->max = 15;
++    def->mode = comAdvanced;
++    def->set_default_value(new ConfigOptionPercent(4));
++
++    def = this->add("nonplanar_ironing_spacing", coFloat);
++    def->label = L("Nonplanar ironing line spacing");
++    def->category = L("Quality");
++    def->tooltip = L("The distance between the lines of nonplanar ironing.");
++    def->sidetext = L("mm");
++    def->min = 0.05;
++    def->max = 0.3;
++    def->mode = comAdvanced;
++    def->set_default_value(new ConfigOptionFloat(0.1));
++
++    def = this->add("nonplanar_ironing_max_angle", coFloat);
++    def->label = L("Nonplanar ironing maximum angle");
++    def->category = L("Quality");
++    def->tooltip = L("Surface parts steeper than this are not ironed: there only a thin edge of the nozzle tip would touch.");
++    def->sidetext = u8"°";	// degrees, don't need translation
++    def->min = 0;
++    def->max = 12;
++    def->mode = comAdvanced;
++    def->set_default_value(new ConfigOptionFloat(8.0));
++
++    def = this->add("nonplanar_ironing_z_offset", coFloat);
++    def->label = L("Nonplanar ironing height offset");
++    def->category = L("Quality");
++    def->tooltip = L("Height of the nozzle tip above the highest surface point under it. Negative values press into the surface.");
++    def->sidetext = L("mm");
++    def->min = -0.03;
++    def->max = 0.05;
++    def->mode = comAdvanced;
++    def->set_default_value(new ConfigOptionFloat(0.0));
++
++    def = this->add("nonplanar_ironing_slope_press", coPercent);
++    def->label = L("Nonplanar ironing slope press");
++    def->category = L("Quality");
++    def->tooltip = L("On a slope the flat nozzle tip only touches with its uphill edge and its middle stays above the surface. "
++                     "This lowers the tip by this share of that gap so the slopes are ironed too; flat parts are not changed. "
++                     "The press is never more than 0.05 mm.");
++    def->sidetext = "%";
++    def->min = 0;
++    def->max = 100;
++    def->mode = comAdvanced;
++    def->set_default_value(new ConfigOptionPercent(50));
++
++    def = this->add("nonplanar_ironing_cross", coBool);
++    def->label = L("Nonplanar ironing cross pass");
++    def->category = L("Quality");
++    def->tooltip = L("Iron the nonplanar surface a second time with the lines turned by 90 degrees. "
++                     "The second pass flattens the ridges the first one leaves; ironing takes twice as long.");
++    def->mode = comAdvanced;
++    def->set_default_value(new ConfigOptionBool(false));
++
+     def = this->add("set_nonplanar_top_surface_flow_ratio", coBool);
+     def->label = L("Set nonplanar top surface flow ratio");
+     def->category = L("Quality");
+diff --git a/src/libslic3r/PrintConfig.hpp b/src/libslic3r/PrintConfig.hpp
+index cbcd58dd..a60a7f75 100644
+--- a/src/libslic3r/PrintConfig.hpp
++++ b/src/libslic3r/PrintConfig.hpp
+@@ -1004,6 +1004,14 @@ PRINT_CONFIG_CLASS_DEFINE(
+     ((ConfigOptionBool,                use_nonplanar_layers))
+     ((ConfigOptionFloat,               nonplanar_layers_angle))
+     ((ConfigOptionFloat,               nonplanar_layers_height))
++    ((ConfigOptionBool,                nonplanar_edge_fix))
++    ((ConfigOptionBool,                nonplanar_ironing))
++    ((ConfigOptionPercent,             nonplanar_ironing_flow))
++    ((ConfigOptionFloat,               nonplanar_ironing_spacing))
++    ((ConfigOptionFloat,               nonplanar_ironing_max_angle))
++    ((ConfigOptionFloat,               nonplanar_ironing_z_offset))
++    ((ConfigOptionPercent,             nonplanar_ironing_slope_press))
++    ((ConfigOptionBool,                nonplanar_ironing_cross))
+     ((ConfigOptionBool,                set_nonplanar_top_surface_flow_ratio))
+     ((ConfigOptionFloat,               nonplanar_top_surface_flow_ratio))
+     ((ConfigOptionBool,                set_nonplanar_top_surface_direction))
+diff --git a/src/libslic3r/PrintObject.cpp b/src/libslic3r/PrintObject.cpp
+index 86434cfe..71b247eb 100644
+--- a/src/libslic3r/PrintObject.cpp
++++ b/src/libslic3r/PrintObject.cpp
+@@ -745,6 +745,7 @@ void PrintObject::ironing()
+                 for (size_t layer_idx = range.begin(); layer_idx < range.end(); ++ layer_idx) {
+                     m_print->throw_if_canceled();
+                     m_layers[layer_idx]->make_ironing();
++                    m_layers[layer_idx]->make_nonplanar_ironing();
+                 }
+             }
+         );
+@@ -1392,7 +1393,15 @@ bool PrintObject::invalidate_state_by_config_options(
+             || opt_key == "lateral_lattice_angle_2"
+             || opt_key == "infill_overhang_angle"
+             || opt_key == "set_nonplanar_top_surface_direction"
+-            || opt_key == "nonplanar_top_surface_direction") {
++            || opt_key == "nonplanar_top_surface_direction"
++            // Ironing paths are appended to the fills, so they are regenerated with them.
++            || opt_key == "nonplanar_ironing"
++            || opt_key == "nonplanar_ironing_flow"
++            || opt_key == "nonplanar_ironing_spacing"
++            || opt_key == "nonplanar_ironing_max_angle"
++            || opt_key == "nonplanar_ironing_z_offset"
++            || opt_key == "nonplanar_ironing_slope_press"
++            || opt_key == "nonplanar_ironing_cross") {
+             steps.emplace_back(posInfill);
+         } else if (opt_key == "sparse_infill_pattern"
+                    || opt_key == "symmetric_infill_y_axis"
+@@ -1456,7 +1465,8 @@ bool PrintObject::invalidate_state_by_config_options(
+         } else if (
+                opt_key == "use_nonplanar_layers"
+             || opt_key == "nonplanar_layers_angle"
+-            || opt_key == "nonplanar_layers_height") {
++            || opt_key == "nonplanar_layers_height"
++            || opt_key == "nonplanar_edge_fix") {
+             steps.emplace_back(posSlice);
+         } else if (
+                 opt_key == "wall_generator"
+@@ -2281,6 +2291,291 @@ PrintObject::detect_nonplanar_surfaces()
+                         }
+                     }
+ 
++                    // Edge extension (on by default; NONPLANAR_EDGE_RING=0 turns it off).  The target surface stops
++                    // at the nonplanar angle; between that line and the wall the home layer
++                    // keeps a thin planar remainder, usually narrower than one line, so it is
++                    // not printed at all (the ragged gap next to the wall).  This shell takes
++                    // it over: the shell then ends at the home layer's own outline, so its
++                    // outer line follows the model's outline at the shell's own depth.  The
++                    // remainder is printed at the height of the surface boundary next to it
++                    // (minus the shell offset), i.e. flat outwards from the boundary; it is
++                    // only taken where that height stays within one layer of the home layer,
++                    // so no material is moved far up or down.  Surface detection, extents
++                    // and the projection polygon are unchanged.
++                    // The source layer is the one whose top matches the shell's height at the
++                    // boundary, not necessarily the home layer: with thin layers the surface
++                    // boundary can sit a layer below the home layer.
++                    if (const double reach = nonplanar_edge_reach(m_config.nonplanar_edge_fix.value); reach > 0.) {
++                        // Outer edge only: holes of the surface (a pocket holding an inlay, e.g. the
++                        // letter part of a two-colour keycap) are left alone, otherwise the edge band
++                        // would swallow the material of the part inside the pocket.
++                        Polygons outer, pockets;
++                        for (const ExPolygon &ex : np_projection) {
++                            outer.emplace_back(ex.contour);
++                            // Tiny holes are gaps of the surface itself (a missing or steep facet
++                            // at the edge), not pockets; the band covers them.
++                            for (const Polygon &hole : ex.holes)
++                                if (std::abs(hole.area()) >= scale_(1.) * scale_(1.) * 0.5)
++                                    pockets.emplace_back(hole);
++                        }
++                        // The band also reaches inside the surface outline: planar slivers left there
++                        // between the shell strips and the remainder would otherwise break the
++                        // shell's outer line.  It is limited per source layer to `reach` from that
++                        // layer's own outline (see below), so interior material is never taken.
++                        const ExPolygons band = diff_ex(offset_ex(union_ex(outer), float(scale_(reach))), pockets);
++                        // The boundary height varies along the outline (sculpted / dished tops), so a
++                        // layer's remainder may belong to a shell up to the surface's height range
++                        // below its home layer.
++                        const int max_steps = std::min(12, 2 + int(std::ceil((nonplanar_surface.stats.max.z - nonplanar_surface.stats.min.z) / std::max(0.05, double(home_layer->height)))));
++                        // Every point of a piece must match the shell height; a long piece of the
++                        // remainder spans varying boundary heights, so a failing piece is cut into
++                        // small cells and every cell is tested on its own (otherwise the whole piece
++                        // stays planar and leaves a notch in the shell's outer line).
++                        // A whole piece needs every point within half a layer: a remainder lifted by
++                        // more would leave a void under it (seen at dished corners, where the
++                        // boundary runs higher).  A cell is assigned by its centre (within half a
++                        // layer, so every cell belongs to exactly one source layer: no void, no
++                        // notch), its corners may deviate a little more.
++                        auto matches = [&](const ExPolygon &piece, const Layer *src, bool cell_mode) {
++                            const double half = 0.5 * src->height;
++                            const double tolerance = cell_mode ? half + 0.03 : half + 0.005;
++                            if (cell_mode) {
++                                const Point c = piece.contour.centroid();
++                                double z = 0.;
++                                // The window is one layer wide but biased slightly upwards: a flat stretch of
++                                // the boundary that sits right at the middle between two layers (the bottom of
++                                // a dish) would otherwise flip between two shells from cell to cell and leave
++                                // notches.
++                                double bias = std::min(0.02, 0.25 * src->height);
++                                if (! nonplanar_surface.height_near(unscale<double>(c.x()), unscale<double>(c.y()), reach + 0.05, z))
++                                    return false;
++                                {
++                                    // Only where the boundary is flat within 1 mm (that is where it can hover
++                                    // at the threshold); a sloped edge such as a ramp crosses it cleanly.
++                                    double zmin = z, zmax = z;
++                                    const double cx0 = unscale<double>(c.x()), cy0 = unscale<double>(c.y());
++                                    for (int k = 0; k < 8; ++ k) {
++                                        const double ang = k * M_PI / 4.;
++                                        double zp = 0.;
++                                        if (nonplanar_surface.height_near(cx0 + std::cos(ang), cy0 + std::sin(ang), reach + 0.05, zp)) {
++                                            zmin = std::min(zmin, zp);
++                                            zmax = std::max(zmax, zp);
++                                        }
++                                    }
++                                    if (zmax - zmin > 0.1)
++                                        bias = 0.;
++                                }
++                                const double dz = z - distance_to_top - src->print_z;
++                                if (dz <= -half + bias || dz > half + bias)
++                                    return false;
++                            }
++                            auto ok = [&](const Polygon &poly) {
++                                for (const Point &p : poly.points) {
++                                    double z = 0.;
++                                    if (! nonplanar_surface.height_near(unscale<double>(p.x()), unscale<double>(p.y()), reach + 0.05, z) ||
++                                        std::abs(z - distance_to_top - src->print_z) > tolerance)
++                                        return false;
++                                }
++                                return true;
++                            };
++                            if (! ok(piece.contour))
++                                return false;
++                            for (const Polygon &hole : piece.holes)
++                                if (! ok(hole))
++                                    return false;
++                            return true;
++                        };
++                        // Sources: the home layer and the layers below it, then the layers above it.
++                        // At dished corners the boundary runs higher than the home layer, so the
++                        // remainder there belongs to a layer above (taken downwards by at most half a
++                        // layer, never lifted over a void).
++                        std::vector<Layer*> sources;
++                        for (Layer *l = home_layer; l != nullptr && l->lower_layer != nullptr && int(sources.size()) < max_steps; l = l->lower_layer)
++                            sources.push_back(l);
++                        {
++                            int up = 0;
++                            for (Layer *l = home_layer->upper_layer; l != nullptr && up < max_steps; l = l->upper_layer, ++ up)
++                                sources.push_back(l);
++                        }
++                        // Only material that this shell does not already cover is taken.  Where the
++                        // shell reaches the wall by itself (the surface runs out to the outline) the
++                        // band lies right under the shell: that planar material is the shell's support,
++                        // and the shell already prints that area, so taking it would only delete it
++                        // (a void under the shell, and the next shells inherit the hole).
++                        Polygons covered;
++                        for (const Layer *l : m_layers)
++                            for (const Surface &s : l->m_regions[region_id]->slices.surfaces)
++                                if (s.is_nonplanar() && s.source_surface_id == nonplanar_surface.stable_id &&
++                                    std::abs(s.distance_to_top - distance_to_top) < 1e-4f)
++                                    polygons_append(covered, to_polygons(s.expolygon));
++                        covered = union_(covered);
++                        // Shell parts from all source layers, and what they could take: used to smooth
++                        // the steps of the shell's outer line where it changes source layer.
++                        ExPolygons shell_np_all, shell_ext_all;
++                        for (Layer *source : sources) {
++                            LayerRegion &source_layerm = *source->m_regions[region_id];
++                            Polygons planar;
++                            for (const Surface &s : source_layerm.slices.surfaces)
++                                if (! s.is_nonplanar())
++                                    polygons_append(planar, to_polygons(s.expolygon));
++                            if (planar.empty())
++                                continue;
++                            // Outer outline only: the ring along a hole of the layer (a pocket, or the
++                            // slit around an inlay part) is not the edge next to the wall.
++                            ExPolygons outline;
++                            for (const ExPolygon &ex : source->lslices_before_nonplanar)
++                                outline.emplace_back(ex.contour);
++                            outline = union_ex(outline);
++                            if (outline.empty())
++                                continue;
++                            ExPolygons ext = intersection_ex(intersection_ex(union_ex(planar), band),
++                                                             diff_ex(outline, offset_ex(outline, -float(scale_(reach)))));
++                            if (! covered.empty())
++                                ext = diff_ex(ext, covered);
++                            const ExPolygons ext_all = ext;
++                            expolygons_append(shell_ext_all, ext);
++                            ExPolygons taken;
++                            const coord_t cell = coord_t(scale_(0.25));
++                            for (ExPolygon &piece : ext) {
++                                if (piece.area() < scale_(0.05) * scale_(0.05))
++                                    continue;
++                                if (matches(piece, source, false)) {
++                                    taken.emplace_back(std::move(piece));
++                                    continue;
++                                }
++                                const BoundingBox bb = get_extents(piece);
++                                // The grid is the same for every source layer, so cells of neighbouring
++                                // layers line up and a cell rejected in one layer is covered by the other.
++                                auto grid_start = [cell](coord_t v) { return coord_t(std::floor(double(v) / double(cell))) * cell; };
++                                for (coord_t cx = grid_start(bb.min.x()); cx < bb.max.x(); cx += cell)
++                                    for (coord_t cy = grid_start(bb.min.y()); cy < bb.max.y(); cy += cell) {
++                                        Polygon square({ Point(cx, cy), Point(cx + cell, cy), Point(cx + cell, cy + cell), Point(cx, cy + cell) });
++                                        for (ExPolygon &sub : intersection_ex(ExPolygons{ piece }, Polygons{ square }))
++                                            if (sub.area() >= scale_(0.02) * scale_(0.02) && matches(sub, source, true))
++                                                taken.emplace_back(std::move(sub));
++                                    }
++                            }
++                            if (std::getenv("NONPLANAR_EDGE_DEBUG") != nullptr) {
++                                double area_ext = 0, area_taken = 0;
++                                for (const ExPolygon &e : ext_all) {
++                                    area_ext += e.area();
++                                    const Point c = e.contour.centroid();
++                                    double z = -1; nonplanar_surface.height_near(unscale<double>(c.x()), unscale<double>(c.y()), reach + 0.05, z);
++                                    std::cerr << "[EDGE] shell " << distance_to_top << " src " << source->print_z << " piece c=("
++                                              << unscale<double>(c.x()) << "," << unscale<double>(c.y()) << ") area=" << unscale<double>(unscale<double>(e.area()))
++                                              << " zb=" << z << " dz=" << (z - distance_to_top - source->print_z) << std::endl;
++                                }
++                                for (const ExPolygon &e : taken) area_taken += e.area();
++                                std::cerr << "[EDGE] shell " << distance_to_top << " src " << source->print_z << " home " << home_layer->print_z
++                                          << " taken " << unscale<double>(unscale<double>(area_taken)) << " of " << unscale<double>(unscale<double>(area_ext)) << " mm2" << std::endl;
++                            }
++                            if (taken.empty())
++                                continue;
++                            SurfaceCollection edge;
++                            edge.append(taken, (shell_thickness == 0 ? stTopNonplanar : stInternalSolidNonplanar), distance_to_top);
++                            for (Surface &s : edge.surfaces) {
++                                s.source_layer_id   = source->id();
++                                s.source_surface_id = nonplanar_surface.stable_id;
++                            }
++                            // Where the shell takes only part of a layer's remainder (the boundary height
++                            // changes along the outline, e.g. towards a dished corner), the shell's outer
++                            // line and the planar part left behind would meet end to end, each drawn half
++                            // a line inside its own region, and leave a hole at the joint.  The shell's part
++                            // is grown a little into the remainder so the two overlap there; only the
++                            // original part is removed from the source layer.
++                            // About one line width: each side is drawn half a line inside its region.
++                            const double overlap = std::max(0.15, 1.1 * this->print()->config().nozzle_diameter.get_at(0));
++                            SurfaceCollection edge_np;
++                            {
++                                const ExPolygons grown = intersection_ex(offset_ex(union_ex(taken), float(scale_(overlap))), ext_all);
++                                expolygons_append(shell_np_all, grown);
++                                edge_np.append(grown, (shell_thickness == 0 ? stTopNonplanar : stInternalSolidNonplanar), distance_to_top);
++                                for (Surface &s : edge_np.surfaces) {
++                                    s.source_layer_id   = source->id();
++                                    s.source_surface_id = nonplanar_surface.stable_id;
++                                }
++                            }
++                            BOOST_LOG_TRIVIAL(info) << "Nonplanar edge extension: surface " << nonplanar_surface.stable_id
++                                << " shell " << distance_to_top << " from layer " << source->id() << " to layer " << home_layer->id()
++                                << ": " << taken.size() << " of " << ext.size() << " pieces";
++                            source_layerm.remove_nonplanar_slices(edge);
++                            home_layerm.append_top_nonplanar_slices(edge_np);
++                            home_layerm.append_nonplanar_surface(nonplanar_surface);
++                            moved_surfaces = true;
++                        }
++                        // Where neighbouring parts of the shell come from different source layers, the
++                        // shell's outer line steps by the difference of the two layers' outlines, and the
++                        // rounded line ends at the step show as a notch.  A closing of the shell's edge
++                        // part turns the step into a short slope; it only adds area the sources could
++                        // give (pockets and the slit around an inlay stay open), printed by the shell on
++                        // top of what is there, nothing is removed for it.
++                        if (! shell_np_all.empty()) {
++                            const ExPolygons np_union = union_ex(shell_np_all);
++                            // Moving average of the outer contour (about +-1 mm along it); only the part
++                            // outside the shell is used, so the step becomes a slope towards the wider side.
++                            Polygons smoothed;
++                            const double step_len = scale_(0.1);
++                            const int    half_win = 10;
++                            for (const ExPolygon &e : np_union) {
++                                Points pts;
++                                const Points &c = e.contour.points;
++                                for (size_t i = 0; i < c.size(); ++ i) {
++                                    const Point a = c[i], b = c[(i + 1) % c.size()];
++                                    const double len = (b - a).cast<double>().norm();
++                                    const int n = std::max(1, int(len / step_len));
++                                    for (int k = 0; k < n; ++ k)
++                                        pts.emplace_back(a + ((b - a).cast<double>() * (double(k) / n)).cast<coord_t>());
++                                }
++                                if (int(pts.size()) < 4 * half_win)
++                                    continue;
++                                Polygon sm;
++                                sm.points.reserve(pts.size());
++                                const int np = int(pts.size());
++                                for (int i = 0; i < np; ++ i) {
++                                    double sx = 0, sy = 0;
++                                    for (int k = -half_win; k <= half_win; ++ k) {
++                                        const Point &q = pts[(i + k + np) % np];
++                                        sx += double(q.x()); sy += double(q.y());
++                                    }
++                                    sm.points.emplace_back(coord_t(sx / (2 * half_win + 1)), coord_t(sy / (2 * half_win + 1)));
++                                }
++                                // Only what lies outside this piece's own outer contour.
++                                polygons_append(smoothed, diff(Polygons{ sm }, Polygons{ e.contour }));
++                            }
++                            // A short bump outwards (a few cells from a lower layer): a closing puts a fillet
++                            // into its foot corners.  Only next to the shell (0.2 mm), so gaps between
++                            // separate pieces are not bridged.
++                            {
++                                const float r = float(scale_(1.5));
++                                Polygons outer_contours;
++                                for (const ExPolygon &e : np_union)
++                                    outer_contours.emplace_back(e.contour);
++                                polygons_append(smoothed, intersection(
++                                    diff(to_polygons(offset_ex(offset_ex(np_union, r), -r)), outer_contours),
++                                    to_polygons(offset_ex(np_union, float(scale_(0.2))))));
++                            }
++                            ExPolygons extra = diff_ex(intersection_ex(union_ex(smoothed), union_ex(shell_ext_all)), np_union);
++                            extra.erase(std::remove_if(extra.begin(), extra.end(),
++                                [](const ExPolygon &e) { return e.area() < scale_(0.02) * scale_(0.02); }), extra.end());
++                            if (std::getenv("NONPLANAR_EDGE_DEBUG") != nullptr) {
++                                double a = 0; for (const ExPolygon &e : extra) a += e.area();
++                                std::cerr << "[EDGE] shell " << distance_to_top << " smoothing adds " << extra.size() << " pieces, "
++                                          << unscale<double>(unscale<double>(a)) << " mm2" << std::endl;
++                            }
++                            if (! extra.empty()) {
++                                SurfaceCollection fill;
++                                fill.append(extra, (shell_thickness == 0 ? stTopNonplanar : stInternalSolidNonplanar), distance_to_top);
++                                for (Surface &s : fill.surfaces) {
++                                    s.source_layer_id   = home_layer->id();
++                                    s.source_surface_id = nonplanar_surface.stable_id;
++                                }
++                                home_layerm.append_top_nonplanar_slices(fill);
++                                home_layerm.append_nonplanar_surface(nonplanar_surface);
++                                moved_surfaces = true;
++                            }
++                        }
++                    }
++
+                     //increase distance to the top layer
+                     distance_to_top += home_layer->height;
+                     break;
+diff --git a/src/libslic3r/PrintObjectSlice.cpp b/src/libslic3r/PrintObjectSlice.cpp
+index d12f03a5..32f2c30a 100644
+--- a/src/libslic3r/PrintObjectSlice.cpp
++++ b/src/libslic3r/PrintObjectSlice.cpp
+@@ -1,5 +1,7 @@
+ #include <boost/log/trivial.hpp>
+ 
++#include <cstdlib>
++
+ #include <tbb/parallel_for.h>
+ 
+ #include "ClipperUtils.hpp"
+@@ -906,16 +908,34 @@ PrintObject::find_nonplanar_surfaces()
+             tmesh.transform(this->trafo_centered() * (*it)->get_matrix(), true);
+             AABBMesh mesh(tmesh, true);
+             std::map<int, NonplanarFacet> facets;
++            // Facets steeper than the nonplanar angle but still part of the edge fillet.
++            // They are kept apart from `facets`: they only serve as projection targets
++            // (a pointer/area target for the strip), and never take part in surface
++            // grouping, extents or the area/height checks.
++            std::map<int, NonplanarFacet> rim_facets;
+ 
+             // store all meshes with slope <= nonplanar_layers_angle in map. Map is necessary to keep facet ID
++            // Rim facets (old edge-ring prototype) are off unless NONPLANAR_EDGE_RIM is set;
++            // the edge is handled by the edge extension in detect_nonplanar_surfaces().
++            static const bool   edge_ring_on = std::getenv("NONPLANAR_EDGE_RIM") != nullptr;
++            static const double edge_ring_facet_angle = []() {
++                const char *v = std::getenv("NONPLANAR_EDGE_FACET_ANGLE");
++                const double a = v != nullptr ? std::atof(v) : 0.0;
++                return (a > 0.0 && a < 89.0) ? a : 85.0;
++            }();
++            const double cos_fill = std::cos(m_config.nonplanar_layers_angle.value * 3.14159265/180.0);
++            const double cos_rim  = std::cos(edge_ring_facet_angle * 3.14159265/180.0);
+             for (int face_id = 0; face_id < mesh.indices().size(); ++ face_id) {
+                 auto &face = mesh.indices(face_id);
+                 Vec3d normal = mesh.normal_by_face_id(face_id);
+ 
+                 //TODO check if normals exist
+-                if (normal.z() >= std::cos(m_config.nonplanar_layers_angle.value * 3.14159265/180.0)) {
++                const bool fill_facet = normal.z() >= cos_fill;
++                const bool rim_facet  = edge_ring_on && ! fill_facet && normal.z() >= cos_rim;
++                if (fill_facet || rim_facet) {
+                     //copy facet
+                     NonplanarFacet new_facet;
++                    new_facet.rim = rim_facet;
+                     new_facet.normal.x = normal.x();
+                     new_facet.normal.y = normal.y();
+                     new_facet.normal.z = normal.z();
+@@ -929,7 +949,10 @@ PrintObject::find_nonplanar_surfaces()
+                         new_facet.neighbor[j] = neighbor[j];
+                     }
+                     new_facet.calculate_stats();
+-                    facets[face_id] = new_facet;
++                    if (rim_facet)
++                        rim_facets[face_id] = new_facet;
++                    else
++                        facets[face_id] = new_facet;
+                 }
+             }
+ 
+@@ -939,6 +962,26 @@ PrintObject::find_nonplanar_surfaces()
+             // group surfaces of this volume; appended to the object below
+             NonplanarSurfaces volume_surfaces = nf.group_surfaces();
+ 
++            // Attach every rim facet to the surface that owns an adjacent shallow facet.
++            // Adjacency (not grouping) keeps the surface count and stable_id independent
++            // of the rim facets, so enabling the feature cannot renumber surfaces.
++            if (! rim_facets.empty()) {
++                std::unordered_map<int, size_t> fill_owner;
++                for (size_t si = 0; si < volume_surfaces.size(); ++ si)
++                    for (const auto &entry : volume_surfaces[si].mesh)
++                        fill_owner[entry.first] = si;
++                for (auto &entry : rim_facets) {
++                    int owner = -1;
++                    for (int j = 0; j < 3 && owner < 0; ++ j) {
++                        auto it = fill_owner.find(entry.second.neighbor[j]);
++                        if (it != fill_owner.end())
++                            owner = int(it->second);
++                    }
++                    if (owner >= 0)
++                        volume_surfaces[size_t(owner)].rim[entry.first] = entry.second;
++                }
++            }
++
+ #ifdef SLIC3R_DEBUG_SLICE_PROCESSING
+             for (size_t id = 0; id < volume_surfaces.size(); ++ id) {
+                 auto& surface = volume_surfaces[id];
+diff --git a/src/slic3r/GUI/ConfigManipulation.cpp b/src/slic3r/GUI/ConfigManipulation.cpp
+index 49e25071..dec994e8 100644
+--- a/src/slic3r/GUI/ConfigManipulation.cpp
++++ b/src/slic3r/GUI/ConfigManipulation.cpp
+@@ -1015,6 +1015,15 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
+ 
+     std::string printer_type = wxGetApp().preset_bundle->printers.get_edited_preset().get_printer_type(wxGetApp().preset_bundle);
+     toggle_line("enable_wrapping_detection", DevPrinterConfigUtil::support_wrapping_detection(printer_type));
++
++    // Nonplanar: the edge extension and the nonplanar ironing work on nonplanar top
++    // shells, so they are only meaningful while nonplanar layers are enabled.
++    const bool nonplanar_on = config->has("use_nonplanar_layers") && config->opt_bool("use_nonplanar_layers");
++    toggle_line("nonplanar_edge_fix", nonplanar_on);
++    toggle_line("nonplanar_ironing", nonplanar_on);
++    const bool nonplanar_ironing_on = nonplanar_on && config->has("nonplanar_ironing") && config->opt_bool("nonplanar_ironing");
++    for (const char *key : { "nonplanar_ironing_flow", "nonplanar_ironing_spacing", "nonplanar_ironing_max_angle", "nonplanar_ironing_z_offset", "nonplanar_ironing_slope_press", "nonplanar_ironing_cross" })
++        toggle_line(key, nonplanar_ironing_on);
+ }
+ 
+ void ConfigManipulation::update_print_sla_config(DynamicPrintConfig* config, const bool is_global_config/* = false*/)
+diff --git a/src/slic3r/GUI/Tab.cpp b/src/slic3r/GUI/Tab.cpp
+index f861cca8..8b120260 100644
+--- a/src/slic3r/GUI/Tab.cpp
++++ b/src/slic3r/GUI/Tab.cpp
+@@ -2387,6 +2387,14 @@ void TabPrint::build()
+         optgroup->append_single_option_line("use_nonplanar_layers");
+         optgroup->append_single_option_line("nonplanar_layers_angle");
+         optgroup->append_single_option_line("nonplanar_layers_height");
++        optgroup->append_single_option_line("nonplanar_edge_fix");
++        optgroup->append_single_option_line("nonplanar_ironing");
++        optgroup->append_single_option_line("nonplanar_ironing_flow");
++        optgroup->append_single_option_line("nonplanar_ironing_spacing");
++        optgroup->append_single_option_line("nonplanar_ironing_max_angle");
++        optgroup->append_single_option_line("nonplanar_ironing_z_offset");
++        optgroup->append_single_option_line("nonplanar_ironing_slope_press");
++        optgroup->append_single_option_line("nonplanar_ironing_cross");
+         optgroup->append_single_option_line("set_nonplanar_top_surface_direction");
+         optgroup->append_single_option_line("nonplanar_top_surface_direction");
+         optgroup->append_single_option_line("set_nonplanar_top_surface_flow_ratio");

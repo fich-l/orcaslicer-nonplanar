@@ -71,6 +71,10 @@ The group contains:
 - **Maximum nonplanar angle** (12°) and **Maximum nonplanar height** (5 mm);
 - **Nonplanar top surface direction**: fixed line direction for nonplanar tops;
 - **Nonplanar top surface flow ratio**.
+- **Extend nonplanar shell to the edge** (on by default): closes the ragged planar gap between a nonplanar
+  shell and the outer wall (steep edges, fillets, keycaps);
+- **Nonplanar ironing** (off by default) with **flow**, **line spacing**, **maximum angle**, **height offset**,
+  **slope press** and **cross pass**. Shown only while nonplanar layers are on.
 
 **Top surface speed** is limited to **50 mm/s** automatically for objects with nonplanar layers (smoother
 nonplanar tops). Lower values in *Speed > Other layers speed > Top surface* are kept.
@@ -97,6 +101,10 @@ add the Quality setting *Use nonplanar layers* and switch it off.
   the material is reordered. The visible top shell is always printed in one piece. If no collision-free order
   exists, slicing stops with a clear message (height, layer, what blocks what, what to change) instead of
   printing a collision.
+- **Nonplanar ironing:** the visible nonplanar top is ironed along the surface. The flat Ø 1.1 mm tip is placed on
+  the highest surface point under it, so it never goes below the surface; *slope press* lowers it on slopes (at most
+  0.05 mm), *cross pass* irons a second time at 90°. Set the flow per pass: with *cross pass* on, half the single-pass
+  flow gives the same amount of material.
 - **No move steeper than 12°**, checked on the final G-code.
 - **Top surfaces at 50 mm/s at most** on objects with nonplanar layers.
 
