@@ -71,6 +71,17 @@ The group contains:
 - **Maximum nonplanar angle** (12°) and **Maximum nonplanar height** (5 mm);
 - **Nonplanar top surface direction**: fixed line direction for nonplanar tops;
 - **Nonplanar top surface flow ratio**.
+- **Extend nonplanar shell to the edge** (on by default): closes the ragged planar gap between a nonplanar
+  shell and the outer wall (steep edges, fillets, keycaps);
+- **Nonplanar ironing** (off by default) with **flow**, **line spacing**, **maximum angle**, **height offset**
+  (+0.02 mm), **slope press** (0 %), **cross pass**, **nozzle tip diameter** (1.1 mm), **minimum area** (2 mm²)
+  and **ironing last, each filament** (on). Shown only while nonplanar layers are on;
+- **Nonplanar flow by real thickness** (on): over the steps of the planar layers below, a conformal shell is
+  thinner than its layer height; the extrusion follows the real gap (down to 30 %);
+- **Clean up nonplanar G-code** (on) with **Leave out extrusions shorter than** (0.3 mm) and **Travel clearance
+  over other filament** (0.8 mm);
+- **Nonplanar in this region** (on): add it to a modifier to keep nonplanar shells out of its volume, or switch it
+  off for the object and on in a modifier to get nonplanar shells only there.
 
 **Top surface speed** is limited to **50 mm/s** automatically for objects with nonplanar layers (smoother
 nonplanar tops). Lower values in *Speed > Other layers speed > Top surface* are kept.
@@ -83,9 +94,11 @@ add the Quality setting *Use nonplanar layers* and switch it off.
 - **Nonplanar top surfaces:** areas with a slope of at most **12°** and a height span of at most **5 mm**.
   The visible top shell and two shells below it follow the surface. The top shell has a single outer line.
   Steeper or taller areas are printed planar as usual.
-- **Preview helpers:** conformal paths are drawn in their own color (bright magenta) in the G-code
-  preview, and a small framed **NP** marker next to the plate thumbnail appears only when the sliced
-  output actually contains nonplanar layers. Currently only with the Windows patch and in the Linux community build, not in the macOS download.
+- **Preview helpers:** the view type **Nonplanar** in the G-code preview colors planar paths grey, conformal
+  paths bright magenta and planar paths printed on a later layer (reordered by the planner) orange, with time,
+  filament length and weight for each. A small framed **NP** marker at the top right of the plate toolbar
+  appears only when the sliced output actually contains nonplanar layers. Currently only with the Windows patch
+  and in the Linux community build, not in the macOS download.
 - **Collision check against a hotend model**, not just an angle:
   - flat nozzle tip Ø 1.1 mm;
   - 12° cone and heater block;
@@ -97,6 +110,16 @@ add the Quality setting *Use nonplanar layers* and switch it off.
   the material is reordered. The visible top shell is always printed in one piece. If no collision-free order
   exists, slicing stops with a clear message (height, layer, what blocks what, what to change) instead of
   printing a collision.
+- **Nonplanar ironing:** the visible nonplanar top is ironed along the surface. The flat tip (*nozzle tip
+  diameter*, measure yours with a caliper) is placed on the highest surface point under it, so it never goes below
+  the surface; *slope press* lowers it on slopes (at most 0.05 mm), *cross pass* irons a second time at 90°. Set
+  the flow per pass: with *cross pass* on, half the single-pass flow gives the same amount of material.
+  - **Two colours:** with *ironing last, each filament* the ironing waits until every filament has printed the
+    layer, then each filament irons its own area. The tip keeps off the other filament's material (an inlaid
+    letter flush with the top), so it does not smear one colour onto the other.
+  - **Calibration:** *Calibration > Nonplanar ironing height* makes five two-colour discs, each ironed at its own
+    height offset (the notches on a disc's front edge give its number). Pick the smoothest disc with a clean colour
+    boundary and use its height offset.
 - **No move steeper than 12°**, checked on the final G-code.
 - **Top surfaces at 50 mm/s at most** on objects with nonplanar layers.
 
