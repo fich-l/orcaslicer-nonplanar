@@ -4173,7 +4173,7 @@ index 0a7b7ba3..cbcd58dd 100644
      // BBS: move from PrintObjectConfig
      ((ConfigOptionBool, independent_support_layer_height))
 diff --git a/src/libslic3r/PrintObject.cpp b/src/libslic3r/PrintObject.cpp
-index 925da0c5..e4d9f9e4 100644
+index 925da0c5..625fb4f4 100644
 --- a/src/libslic3r/PrintObject.cpp
 +++ b/src/libslic3r/PrintObject.cpp
 @@ -470,6 +470,10 @@ void PrintObject::make_perimeters()
@@ -4407,7 +4407,7 @@ index 925da0c5..e4d9f9e4 100644
  
          //            Slic3r::debugf "  layer %d has %d bottom, %d top and %d internal surfaces\n",
          //                $layerm->layer->id, scalar(@bottom), scalar(@top), scalar(@internal) if $Slic3r::debug;
-@@ -1923,6 +2029,340 @@ void PrintObject::detect_surfaces_type()
+@@ -1923,6 +2029,342 @@ void PrintObject::detect_surfaces_type()
      m_typed_slices = true;
  }
  
@@ -4539,6 +4539,8 @@ index 925da0c5..e4d9f9e4 100644
 +        int stable_surface_id = 0;
 +        for (auto& nonplanar_surface: this->nonplanar_surfaces()) {
 +            nonplanar_surface.stable_id = stable_surface_id++;
++            // The projection unions every facet; computed once, not per layer and shell.
++            const ExPolygons projection = nonplanar_surface.horizontal_projection();
 +            float distance_to_top = 0.0f;            
 +            for (int shell_thickness = 0; region.config().top_shell_layers > shell_thickness; ++shell_thickness){
 +                //search home layer where the area is projected to
@@ -4572,7 +4574,7 @@ index 925da0c5..e4d9f9e4 100644
 +                            Surfaces upper_surfaces = upper_layerm.slices.surfaces;
 +                            topNonplanar.append(
 +                                intersection_ex(
-+                                    nonplanar_surface.horizontal_projection(),
++                                    projection,
 +                                    union_ex(
 +                                        diff_ex(
 +                                            layerm_slices_surfaces, 
@@ -4596,7 +4598,7 @@ index 925da0c5..e4d9f9e4 100644
 +                            if (upper_nonplanar.size() > 0)
 +                                topNonplanar.append(
 +                                    intersection_ex(
-+                                        nonplanar_surface.horizontal_projection(),
++                                        projection,
 +                                        to_expolygons(upper_nonplanar.surfaces),
 +                                        ApplySafetyOffset::No),
 +                                    (shell_thickness == 0 ? stTopNonplanar : stInternalSolidNonplanar),
@@ -4606,7 +4608,7 @@ index 925da0c5..e4d9f9e4 100644
 +                        else {
 +                            topNonplanar.append(
 +                                intersection_ex(
-+                                    nonplanar_surface.horizontal_projection(),
++                                    projection,
 +                                    union_ex(to_expolygons(layerm_slices_surfaces)),
 +                                    ApplySafetyOffset::No),
 +                                (shell_thickness == 0 ? stTopNonplanar : stInternalSolidNonplanar),
@@ -4748,7 +4750,7 @@ index 925da0c5..e4d9f9e4 100644
  void PrintObject::process_external_surfaces()
  {
      BOOST_LOG_TRIVIAL(info) << "Processing external surfaces..." << log_memory_info();
-@@ -2063,7 +2503,7 @@ void PrintObject::discover_vertical_shells()
+@@ -2063,7 +2505,7 @@ void PrintObject::discover_vertical_shells()
                          LayerRegion &layerm               = *layer.m_regions[region_id];
                          float        top_bottom_expansion = float(layerm.flow(frSolidInfill).scaled_spacing()) * top_bottom_expansion_coeff;
                          // Top surfaces.
@@ -4757,7 +4759,7 @@ index 925da0c5..e4d9f9e4 100644
  //                        append(cache.top_surfaces, offset(layerm.fill_surfaces.filter_by_type(stTop), top_bottom_expansion));
                          // Bottom surfaces.
                          append(cache.bottom_surfaces, offset(layerm.slices.filter_by_types(surfaces_bottom), top_bottom_expansion));
-@@ -2132,7 +2572,7 @@ void PrintObject::discover_vertical_shells()
+@@ -2132,7 +2574,7 @@ void PrintObject::discover_vertical_shells()
                          float        top_bottom_expansion = float(layerm.flow(frSolidInfill).scaled_spacing()) * top_bottom_expansion_coeff;
                          // Top surfaces.
                          auto &cache = cache_top_botom_regions[idx_layer];
@@ -4766,7 +4768,7 @@ index 925da0c5..e4d9f9e4 100644
  //                        append(cache.top_surfaces, offset(layerm.fill_surfaces.filter_by_type(stTop), top_bottom_expansion));
                          // Bottom surfaces.
                          cache.bottom_surfaces = offset(layerm.slices.filter_by_types(surfaces_bottom), top_bottom_expansion);
-@@ -2332,14 +2772,15 @@ void PrintObject::discover_vertical_shells()
+@@ -2332,14 +2774,15 @@ void PrintObject::discover_vertical_shells()
  #endif /* SLIC3R_DEBUG_SLICE_PROCESSING */
  
                      // Trim the shells region by the internal & internal void surfaces.
@@ -4784,7 +4786,7 @@ index 925da0c5..e4d9f9e4 100644
  
                      // These regions will be filled by a rectilinear full infill. Currently this type of infill
                      // only fills regions, which fit at least a single line. To avoid gaps in the sparse infill,
-@@ -2399,7 +2840,7 @@ void PrintObject::discover_vertical_shells()
+@@ -2399,7 +2842,7 @@ void PrintObject::discover_vertical_shells()
                      if (regularized_shell.empty())
                          continue;
  
@@ -4793,7 +4795,7 @@ index 925da0c5..e4d9f9e4 100644
  #ifdef SLIC3R_DEBUG_SLICE_PROCESSING
                      {
                          Slic3r::SVG svg(debug_out_path("discover_vertical_shells-regularized-%d.svg", debug_idx), get_extents(shell_before));
-@@ -2426,7 +2867,10 @@ void PrintObject::discover_vertical_shells()
+@@ -2426,7 +2869,10 @@ void PrintObject::discover_vertical_shells()
  #endif /* SLIC3R_DEBUG_SLICE_PROCESSING */
  
                      // Assign resulting internal surfaces to layer.
@@ -4805,7 +4807,7 @@ index 925da0c5..e4d9f9e4 100644
                      layerm->fill_surfaces.append(new_internal,       stInternal);
                      layerm->fill_surfaces.append(new_internal_void,  stInternalVoid);
                      layerm->fill_surfaces.append(new_internal_solid, stInternalSolid);
-@@ -3996,13 +4440,17 @@ void PrintObject::discover_horizontal_shells()
+@@ -3996,13 +4442,17 @@ void PrintObject::discover_horizontal_shells()
                  // Surfaces including the area of perimeters. Everything, that is visible from the top / bottom
                  // (not covered by a layer above / below).
                  // This does not contain the areas covered by perimeters!
@@ -4825,7 +4827,7 @@ index 925da0c5..e4d9f9e4 100644
                          polygons_append(solid, to_polygons(surface.expolygon));
                  if (solid.empty())
                      continue;
-@@ -4124,7 +4572,15 @@ void PrintObject::discover_horizontal_shells()
+@@ -4124,7 +4574,15 @@ void PrintObject::discover_horizontal_shells()
                      // internal-solid are the union of the existing internal-solid surfaces
                      // and new ones
                      SurfaceCollection backup = std::move(neighbor_layerm->fill_surfaces);
@@ -4841,7 +4843,7 @@ index 925da0c5..e4d9f9e4 100644
                      ExPolygons internal_solid = union_ex(new_internal_solid);
                      // assign new internal-solid surfaces to layer
                      neighbor_layerm->fill_surfaces.set(internal_solid, stInternalSolid);
-@@ -4143,6 +4599,7 @@ void PrintObject::discover_horizontal_shells()
+@@ -4143,6 +4601,7 @@ void PrintObject::discover_horizontal_shells()
                              diff_ex(group, polygons_internal),
                              // Use an existing surface as a template, it carries the bridge angle etc.
                              *group.front());
