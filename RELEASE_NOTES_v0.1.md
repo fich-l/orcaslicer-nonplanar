@@ -1,4 +1,4 @@
-First public test release of OrcaSlicer Nonplanar (OrcaSlicer 2.4.2) for macOS (Apple Silicon).
+First public test release of OrcaSlicer Nonplanar (OrcaSlicer 2.4.2) for macOS (Apple Silicon), Windows (x64) and Linux (x86_64).
 
 **Highlights**
 - Nonplanar top surfaces up to 12° and 5 mm height span; the visible top shell is printed in one piece.
@@ -17,8 +17,10 @@ same A1 mini settings (12°, 5 mm):
 | Slicing time | 0–22 s | 0–66 s (print-order planning) |
 
 **Install**
-- Open the DMG and drag the app to Applications. The app is unsigned: on macOS 15 and newer, start it once,
+- **Windows:** run the `-Setup.exe` installer or unzip the portable ZIP. The app is unsigned: click "More info", then "Run anyway".
+- **Linux:** `chmod +x` the AppImage and start it.
+- **macOS:** open the DMG and drag the app to Applications. The app is unsigned: on macOS 15 and newer, start it once,
   then click "Open Anyway" in System Settings > Privacy & Security (older macOS: right-click > Open).
 - Print `test-prints/Nonplanar vs Standard Comparison v1.0.3mf` from the repository first.
 
-**Known limits:** macOS on Apple Silicon only (no Intel Macs, Windows or Linux), one hotend model for all printers, unsigned, test status.
+**Known limits:** no Intel Macs and no ARM builds for Windows or Linux; Windows and Linux only tested automatically so far; one hotend model for all printers, unsigned, test status.

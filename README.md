@@ -1,11 +1,10 @@
 # OrcaSlicer Nonplanar v0.1
 
 > [!IMPORTANT]
-> **Official build: macOS with Apple Silicon (M1 or newer).**
-> v0.1 ships no Intel Mac, Windows or Linux binary, but the source now also builds on
-> Windows with MSVC — see [`BUILD-WINDOWS.md`](BUILD-WINDOWS.md).
->
-> **Linux:** there is an unofficial [community AppImage](#linux-community-build) for x86_64.
+> **Downloads for macOS (Apple Silicon), Windows (x64) and Linux (x86_64)** in
+> [Releases](https://github.com/fich-l/orcaslicer-nonplanar/releases). All three are built from the same source.
+> The Windows and Linux builds are new and have only been tested automatically so far: please report how they
+> work for you. No Intel Mac and no ARM build for Windows or Linux.
 
 **Test release.** OrcaSlicer 2.4.2 with **nonplanar top surfaces**: the last shells of gently sloped tops
 (up to 12°) follow the surface instead of being printed as stair steps. Every nonplanar move is checked against
@@ -83,9 +82,6 @@ add the Quality setting *Use nonplanar layers* and switch it off.
 - **Nonplanar top surfaces:** areas with a slope of at most **12°** and a height span of at most **5 mm**.
   The visible top shell and two shells below it follow the surface. The top shell has a single outer line.
   Steeper or taller areas are printed planar as usual.
-- **Preview helpers:** conformal paths are drawn in their own color (bright magenta) in the G-code
-  preview, and a small framed **NP** marker next to the plate thumbnail appears only when the sliced
-  output actually contains nonplanar layers. Currently only with the Windows patch and in the Linux community build, not in the macOS download.
 - **Collision check against a hotend model**, not just an angle:
   - flat nozzle tip Ø 1.1 mm;
   - 12° cone and heater block;
@@ -101,6 +97,8 @@ add the Quality setting *Use nonplanar layers* and switch it off.
 - **Top surfaces at 50 mm/s at most** on objects with nonplanar layers.
 
 ## Install
+
+### macOS
 
 Download `OrcaSlicer-Nonplanar-v0.1-macOS-arm64.dmg` from
 [Releases](https://github.com/fich-l/orcaslicer-nonplanar/releases).
@@ -124,26 +122,39 @@ Download `OrcaSlicer-Nonplanar-v0.1-macOS-arm64.dmg` from
 
 Requirements: Apple Silicon Mac (M1 or newer), macOS 11.3 or newer.
 
-## Linux (community build)
+### Windows
 
-[3DEnthusiast](https://github.com/3DEnthusiast) maintains an unofficial x86_64 AppImage, built on Zorin OS
-(based on Ubuntu 24.04):
-[`OrcaSlicer-Nonplanar.AppImage`](https://github.com/3DEnthusiast/orcaslicer-nonplanar/releases/tag/v0.1-linux).
-It has not been tested by this project, so please report Linux-specific problems in
-[that fork's issues](https://github.com/3DEnthusiast/orcaslicer-nonplanar/issues).
+Download from [Releases](https://github.com/fich-l/orcaslicer-nonplanar/releases) either
+- `OrcaSlicer-Nonplanar-v0.1-Windows-x64-Setup.exe` (installer), or
+- `OrcaSlicer-Nonplanar-v0.1-Windows-x64-portable.zip` (unzip anywhere, then start `orca-slicer.exe` in the
+  folder *OrcaSlicer Nonplanar*).
+
+The installer puts the app into its own folder (*OrcaSlicer Nonplanar*), next to a normal OrcaSlicer.
+
+> [!WARNING]
+> The app is not signed, so Windows SmartScreen shows "Windows protected your PC" on the first start.
+> Click **More info**, then **Run anyway**.
+
+Requirements: Windows 10 or 11, 64-bit (x64).
+
+### Linux
+
+Download `OrcaSlicer-Nonplanar-v0.1-Linux-x86_64.AppImage` from
+[Releases](https://github.com/fich-l/orcaslicer-nonplanar/releases), then:
 
 ```bash
-chmod +x OrcaSlicer-Nonplanar.AppImage && ./OrcaSlicer-Nonplanar.AppImage
+chmod +x OrcaSlicer-Nonplanar-v0.1-Linux-x86_64.AppImage && ./OrcaSlicer-Nonplanar-v0.1-Linux-x86_64.AppImage
 ```
 
-- If the 3D view or dialogs misbehave on Wayland: `GDK_BACKEND=x11 ./OrcaSlicer-Nonplanar.AppImage`
-- If it won't start because FUSE is missing: `./OrcaSlicer-Nonplanar.AppImage --appimage-extract-and-run`
+- If the 3D view or dialogs misbehave on Wayland: `GDK_BACKEND=x11 ./OrcaSlicer-Nonplanar-v0.1-Linux-x86_64.AppImage`
+- If it won't start because FUSE is missing: `./OrcaSlicer-Nonplanar-v0.1-Linux-x86_64.AppImage --appimage-extract-and-run`
 
-To build it yourself, see [`BUILD-LINUX.md`](BUILD-LINUX.md).
+Requirements: x86_64, built on Ubuntu 24.04 (distributions of that age or newer).
 
 ## First start
 
-- The app has **its own settings folder** (`~/Library/Application Support/OrcaSlicerNonplanar`). An installed
+- The app has **its own settings folder** (`OrcaSlicerNonplanar`; on macOS
+  `~/Library/Application Support/OrcaSlicerNonplanar`, on Windows `%APPDATA%\OrcaSlicerNonplanar`). An installed
   OrcaSlicer is not touched: its settings, file associations and `orcaslicer://` links stay as they are, and
   both can run side by side.
 - Orca's setup wizard asks for your printers and filaments, as in normal OrcaSlicer.
@@ -175,7 +186,8 @@ Please open an [issue](https://github.com/fich-l/orcaslicer-nonplanar/issues) wi
 
 OrcaSlicer is licensed under the **GNU AGPL-3.0**; so is this modification (see `LICENSE`).
 The complete source is OrcaSlicer v2.4.2 (commit `8500fcdccaa10b5099ac20d252af3a7c560046f1`) plus
-[`orca-nonplanar.patch`](orca-nonplanar.patch). How to build it is in [`BUILD.md`](BUILD.md).
+[`orca-nonplanar.patch`](orca-nonplanar.patch). How to build it is in [`BUILD.md`](BUILD.md) (macOS),
+[`BUILD-WINDOWS.md`](BUILD-WINDOWS.md) and [`BUILD-LINUX.md`](BUILD-LINUX.md).
 
 ## Credits
 
