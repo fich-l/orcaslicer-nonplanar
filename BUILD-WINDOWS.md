@@ -1,7 +1,8 @@
 # Building OrcaSlicer Nonplanar on Windows
 
-Windows is not officially released yet, but the source builds and runs on Windows 10/11 x64.
-This document describes the port, what it changes, and how to build it with MSVC.
+Windows x64 downloads are in [Releases](https://github.com/fich-l/orcaslicer-nonplanar/releases), built by
+[`.github/workflows/build.yml`](.github/workflows/build.yml) exactly as described here. This document describes
+the port, what it changes, and how to build it yourself with MSVC.
 
 The base is the same as the macOS build: upstream OrcaSlicer **v2.4.2**
 (commit `8500fcdccaa10b5099ac20d252af3a7c560046f1`) plus `orca-nonplanar.patch`,
@@ -9,18 +10,11 @@ then [`windows/orca-nonplanar-windows.patch`](orca-nonplanar-windows.patch) on t
 
 ## What the Windows patch adds
 
-Only the preview and the installer are touched; the nonplanar slicing itself is platform
-independent and unchanged.
+Only the installer is touched; the nonplanar slicing itself is platform independent and unchanged.
 
 | Change | File(s) |
 |---|---|
-| Preview: conformal (nonplanar) paths are drawn in their own color, bright magenta, in every view mode | `src/libvgcode/include/PathVertex.hpp`, `src/libvgcode/src/ViewerImpl.cpp`, `src/slic3r/GUI/LibVGCode/LibVGCodeWrapper.cpp`, `src/libslic3r/GCode/GCodeProcessor.{hpp,cpp}` |
-| Preview: a small framed **NP** marker next to the plate thumbnail, shown only when the sliced output contains nonplanar layers | `src/slic3r/GUI/GCodeViewer.{hpp,cpp}` |
-| G-code preview: `;PATH_TASK ... conformal=1` comments are parsed so the preview knows which paths are conformal | `src/libslic3r/GCode/GCodeProcessor.cpp` |
 | Windows installer: own package name, install directory and registry key (`OrcaSlicer Nonplanar`), so it can be installed next to a normal OrcaSlicer instead of replacing it | `CMakeLists.txt` (CPack block) |
-
-The "NP" marker and the magenta color are deliberately plain literals, not translated
-strings, so they look the same in every UI language.
 
 ## Requirements
 
@@ -87,9 +81,6 @@ orca-slicer.exe --load-settings "machine.json;process.json" ^
 The G-code should start with `; OrcaSlicer Nonplanar v0.1` and contain
 `;PATH_TASK ... conformal=1` lines. With nonplanar enabled the 10 deg ramp of the test
 fixture produces 135 conformal paths; with `use_nonplanar_layers=0` the same model produces 0.
-
-In the preview (Preview tab) the conformal paths are magenta and the **NP** marker appears
-next to the plate thumbnail; with nonplanar switched off the marker disappears.
 
 ## Known limitations
 

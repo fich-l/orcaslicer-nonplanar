@@ -1,0 +1,328 @@
+# Windows x64 and Linux x86_64 builds of OrcaSlicer Nonplanar: upstream OrcaSlicer at
+# the pinned commit + orca-nonplanar.patch (Windows also windows/orca-nonplanar-windows.patch,
+# installer identity only).
+#
+# Windows is built like the community Windows port (Visual Studio 2022, CMake 3.31,
+# build_release_vs2022.bat): NSIS installer + portable ZIP.
+# Linux is built like the community Linux port (Ubuntu 24.04, GCC, build_linux.sh): AppImage.
+# Both run the nonplanar C++ tests and slice the test models; the G-code is uploaded for
+# comparison with the macOS build.
+name: Build Windows and Linux
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: "Platforms"
+        type: choice
+        options: [both, windows, linux]
+        default: both
+
+env:
+  ORCA_COMMIT: 8500fcdccaa10b5099ac20d252af3a7c560046f1   # OrcaSlicer v2.4.2
+  # "Support sees the object ..." needs a model that is not part of this repository.
+  TEST_FILTER: '[Nonplanar]~"Scenario: Support sees the object before the conformal shells were moved"'
+
+jobs:
+  windows:
+    if: ${{ inputs.platform != 'linux' }}
+    runs-on: windows-2022
+    timeout-minutes: 360
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Keep line endings (the patches have LF)
+        run: git config --global core.autocrlf false
+
+      - name: Check out this repository
+        uses: actions/checkout@v4
+        with:
+          path: np
+
+      - name: Check out OrcaSlicer ${{ env.ORCA_COMMIT }}
+        uses: actions/checkout@v4
+        with:
+          repository: OrcaSlicer/OrcaSlicer
+          ref: ${{ env.ORCA_COMMIT }}
+          path: orca
+          lfs: false
+
+      - name: Apply the nonplanar patches
+        working-directory: orca
+        run: |
+          git apply --whitespace=nowarn ../np/orca-nonplanar.patch
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git apply --whitespace=nowarn ../np/windows/orca-nonplanar-windows.patch
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Version
+        run: |
+          $v = (Select-String -Path orca/version.inc -Pattern 'ORCA_NONPLANAR_VERSION "v([^"]+)"').Matches[0].Groups[1].Value
+          "NP_VERSION=$v" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
+          "Version $v"
+
+      - name: CMake 3.31
+        uses: lukka/get-cmake@latest
+        with:
+          cmakeVersion: "~3.31.0"
+
+      # CMake must come before Strawberry Perl's c\bin on PATH, otherwise
+      # OrcaSlicer's CMakeLists.txt refuses to configure.
+      - name: Tools
+        run: |
+          choco install strawberryperl nsis -y --no-progress
+          $cmake = Split-Path (Get-Command cmake).Source
+          "CMAKE_DIR=$cmake" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
+          cmake --version
+
+      - name: MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Restore cached dependencies
+        id: deps
+        uses: actions/cache/restore@v4
+        with:
+          path: orca/deps/build/OrcaSlicer_dep
+          key: windows-vs2022-x64-orca-deps-${{ env.ORCA_COMMIT }}-${{ hashFiles('orca/deps/**') }}
+
+      - name: Build dependencies
+        if: ${{ steps.deps.outputs.cache-hit != 'true' }}
+        working-directory: orca
+        run: |
+          $env:PATH = "$env:CMAKE_DIR;$env:PATH"
+          .\build_release_vs2022.bat deps
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # The batch file doesn't always pass errors on, so check the result.
+          if (-not (Test-Path "deps/build/OrcaSlicer_dep/usr/local/include")) { throw "Dependencies were not built" }
+
+      # Saved right away, so a failing slicer build doesn't lose hours of dependency builds.
+      - name: Save dependencies
+        if: ${{ steps.deps.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: orca/deps/build/OrcaSlicer_dep
+          key: ${{ steps.deps.outputs.cache-primary-key }}
+
+      - name: Build OrcaSlicer Nonplanar
+        working-directory: orca
+        run: |
+          $env:PATH = "$env:CMAKE_DIR;$env:PATH;C:\Strawberry\c\bin;C:\Strawberry\perl\bin"
+          .\build_release_vs2022.bat slicer
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Test-Path "build\OrcaSlicer\orca-slicer.exe")) {
+            Get-ChildItem "build\OrcaSlicer" -ErrorAction SilentlyContinue | Select-Object -First 30
+            throw "No orca-slicer.exe in build\OrcaSlicer"
+          }
+
+      - name: Package installer and portable ZIP
+        id: package
+        run: |
+          $name = "OrcaSlicer-Nonplanar-v$env:NP_VERSION-Windows-x64"
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+
+          Push-Location orca\build
+          & "$env:CMAKE_DIR\cpack.exe" -G NSIS -C Release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $setup = Get-ChildItem -Filter "OrcaSlicer_Nonplanar_Windows_Installer_*.exe" | Select-Object -First 1
+          if (-not $setup) { throw "cpack wrote no installer" }
+          Pop-Location
+          Copy-Item $setup.FullName "dist\$name-Setup.exe"
+
+          $stage = "stage\OrcaSlicer Nonplanar"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item -Recurse -Force "orca\build\OrcaSlicer\*" $stage
+          Copy-Item "np\packaging\0.20mm Nonplanar @BBL A1M.json" $stage
+          Copy-Item "np\LICENSE" "$stage\LICENSE.txt"
+          (Get-Content "np\packaging\README-Windows.txt" -Raw).Replace('@VERSION@', $env:NP_VERSION) |
+            Set-Content -Encoding utf8 "$stage\README.txt"
+          Compress-Archive -Path $stage -DestinationPath "dist\$name-portable.zip" -CompressionLevel Optimal
+
+          $sums = Get-ChildItem dist | ForEach-Object { (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower() + "  " + $_.Name }
+          [IO.File]::WriteAllText("$PWD\dist\SHA256SUMS-Windows.txt", ($sums -join "`n") + "`n")
+          Get-Content dist\SHA256SUMS-Windows.txt
+
+      - name: Upload Windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: OrcaSlicer-Nonplanar-Windows-x64
+          path: dist/*
+          retention-days: 30
+
+      # Debug symbols, to read crash dumps (not part of the download).
+      - name: Upload debug symbols
+        uses: actions/upload-artifact@v4
+        with:
+          name: OrcaSlicer-Nonplanar-Windows-x64-pdb
+          path: |
+            orca/build/src/Release/*.pdb
+            orca/build/src/Release/*.dll
+            orca/build/src/Release/*.exe
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Nonplanar C++ tests
+        working-directory: orca/build
+        env:
+          NONPLANAR_FIXTURES_DIR: ${{ github.workspace }}/np/tests/prusaslicer-nonplanar
+          NONPLANAR_ORCA_PROFILES_DIR: ${{ github.workspace }}/np/tests/orcaslicer-nonplanar/profiles
+        run: |
+          $env:PATH = "$env:CMAKE_DIR;$env:PATH"
+          $env:CMAKE_POLICY_VERSION_MINIMUM = "3.5"
+          cmake .. -DBUILD_TESTS=ON
+          cmake --build . --config Release --target fff_print_tests -- -m
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $exe = Get-ChildItem -Recurse -Filter fff_print_tests.exe | Select-Object -First 1
+          & $exe.FullName $env:TEST_FILTER
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Slice the test models
+        # Runs even if the C++ tests fail.
+        if: ${{ !cancelled() && steps.package.outcome == 'success' }}
+        run: |
+          $exe = "stage\OrcaSlicer Nonplanar\orca-slicer.exe"
+          $p = "np\tests\orcaslicer-nonplanar\profiles"
+          $models = @("np\tests\prusaslicer-nonplanar\fixtures\ramp-10deg-hole.stl",
+                      "np\tests\prusaslicer-nonplanar\fixtures\wave-retriangulated.stl",
+                      "np\tests\prusaslicer-nonplanar\fixtures\triangle-mixed-slope-tessellated.stl",
+                      "np\tests\models\angle-test-v1.3-A.stl")
+          foreach ($m in $models) {
+            $n = [IO.Path]::GetFileNameWithoutExtension($m)
+            $out = "slices\$n"
+            New-Item -ItemType Directory -Force -Path "$out\data" | Out-Null
+            & $exe --datadir "$out\data" --load-settings "$p\machine.json;$p\process-np.json" --load-filaments "$p\filament.json" `
+              --orient 0 --slice 0 --outputdir $out $m | Out-File "$out\slice.log"
+            if (-not (Test-Path "$out\plate_1.gcode")) { Get-Content "$out\slice.log" -Tail 20; throw "No G-code for $n" }
+            "$n sliced"
+          }
+
+      - name: Upload test G-code
+        if: ${{ !cancelled() && steps.package.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-gcode-windows-x64
+          path: slices/*/plate_1.gcode
+          retention-days: 30
+
+  linux:
+    if: ${{ inputs.platform != 'windows' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Check out this repository
+        uses: actions/checkout@v4
+        with:
+          path: np
+
+      - name: Check out OrcaSlicer ${{ env.ORCA_COMMIT }}
+        uses: actions/checkout@v4
+        with:
+          repository: OrcaSlicer/OrcaSlicer
+          ref: ${{ env.ORCA_COMMIT }}
+          path: orca
+          lfs: false
+
+      - name: Apply the nonplanar patch
+        working-directory: orca
+        run: git apply --whitespace=nowarn ../np/orca-nonplanar.patch
+
+      - name: Version
+        run: |
+          v=$(sed -n 's/^set(ORCA_NONPLANAR_VERSION "v\(.*\)")$/\1/p' orca/version.inc)
+          [ -n "$v" ] || { echo "ORCA_NONPLANAR_VERSION missing"; exit 1; }
+          echo "NP_VERSION=$v" >> "$GITHUB_ENV"
+          echo "Version $v"
+
+      # As in OrcaSlicer's own CI (.github/actions/apt-install-deps).
+      - name: System packages
+        working-directory: orca
+        run: |
+          mkdir -p deps/build/destdir
+          sudo ./build_linux.sh -ur
+          sudo chown -R "$USER" ./
+          sudo apt-get install -y xvfb
+
+      - name: Restore cached dependencies
+        id: deps
+        uses: actions/cache/restore@v4
+        with:
+          path: orca/deps/build/OrcaSlicer_dep
+          key: linux-gcc-x64-orca-deps-${{ env.ORCA_COMMIT }}-${{ hashFiles('orca/deps/**') }}
+
+      - name: Build dependencies
+        if: ${{ steps.deps.outputs.cache-hit != 'true' }}
+        working-directory: orca
+        run: |
+          ./build_linux.sh -dr
+          test -d deps/build/OrcaSlicer_dep/usr/local/include || { echo "Dependencies were not built"; exit 1; }
+
+      - name: Save dependencies
+        if: ${{ steps.deps.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: orca/deps/build/OrcaSlicer_dep
+          key: ${{ steps.deps.outputs.cache-primary-key }}
+
+      - name: Build OrcaSlicer Nonplanar, tests and AppImage
+        working-directory: orca
+        run: |
+          ./build_linux.sh -srti
+          ./scripts/check_appimage_libs.sh ./build/package ./build/package/bin/orca-slicer
+          ls -la build/*.AppImage
+
+      - name: Package AppImage
+        id: package
+        run: |
+          name="OrcaSlicer-Nonplanar-v$NP_VERSION-Linux-x86_64.AppImage"
+          mkdir -p dist
+          cp orca/build/OrcaSlicer_Linux_V*.AppImage "dist/$name"
+          chmod +x "dist/$name"
+          (cd dist && sha256sum "$name" > SHA256SUMS-Linux.txt && cat SHA256SUMS-Linux.txt)
+          echo "APPIMAGE=$PWD/dist/$name" >> "$GITHUB_ENV"
+
+      - name: Upload Linux build
+        uses: actions/upload-artifact@v4
+        with:
+          name: OrcaSlicer-Nonplanar-Linux-x86_64
+          path: dist/*
+          retention-days: 30
+
+      - name: Nonplanar C++ tests
+        working-directory: orca/build
+        env:
+          NONPLANAR_FIXTURES_DIR: ${{ github.workspace }}/np/tests/prusaslicer-nonplanar
+          NONPLANAR_ORCA_PROFILES_DIR: ${{ github.workspace }}/np/tests/orcaslicer-nonplanar/profiles
+        run: |
+          exe=$(find . -name fff_print_tests -type f -perm -u+x | head -1)
+          [ -n "$exe" ] || { echo "fff_print_tests not built"; exit 1; }
+          "$exe" "$TEST_FILTER"
+
+      - name: Slice the test models
+        # Runs even if the C++ tests fail; uses the AppImage that is uploaded.
+        if: ${{ !cancelled() && steps.package.outcome == 'success' }}
+        run: |
+          p=np/tests/orcaslicer-nonplanar/profiles
+          for m in np/tests/prusaslicer-nonplanar/fixtures/ramp-10deg-hole.stl \
+                   np/tests/prusaslicer-nonplanar/fixtures/wave-retriangulated.stl \
+                   np/tests/prusaslicer-nonplanar/fixtures/triangle-mixed-slope-tessellated.stl \
+                   np/tests/models/angle-test-v1.3-A.stl; do
+            n=$(basename "$m" .stl); out="slices/$n"; mkdir -p "$out/data"
+            xvfb-run -a "$APPIMAGE" --appimage-extract-and-run --datadir "$out/data" \
+              --load-settings "$p/machine.json;$p/process-np.json" --load-filaments "$p/filament.json" \
+              --orient 0 --slice 0 --outputdir "$out" "$m" > "$out/slice.log" 2>&1 || true
+            [ -f "$out/plate_1.gcode" ] || { tail -20 "$out/slice.log"; echo "No G-code for $n"; exit 1; }
+            echo "$n sliced"
+          done
+
+      - name: Upload test G-code
+        if: ${{ !cancelled() && steps.package.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-gcode-linux-x86_64
+          path: slices/*/plate_1.gcode
+          retention-days: 30

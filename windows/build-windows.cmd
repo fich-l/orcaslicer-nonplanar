@@ -37,7 +37,7 @@ if errorlevel 1 (
     echo Applying orca-nonplanar.patch ...
     git apply "%PATCH_DIR%\orca-nonplanar.patch" || exit /b 1
 )
-findstr /C:"NONPLANAR_COLOR" src\libvgcode\src\ViewerImpl.cpp >nul 2>nul
+findstr /C:"OrcaSlicerNonplanar" CMakeLists.txt >nul 2>nul
 if errorlevel 1 (
     echo Applying windows\orca-nonplanar-windows.patch ...
     git apply "%PATCH_DIR%\windows\orca-nonplanar-windows.patch" || exit /b 1
