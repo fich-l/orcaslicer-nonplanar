@@ -5933,3 +5933,212 @@ index 76985433..6d85630a 100644
  string(REGEX MATCH "^([0-9]+)\\.([0-9]+)\\.([0-9]+)"
         SoftFever_VERSION_MATCH ${SoftFever_VERSION})
  set(ORCA_VERSION_MAJOR ${CMAKE_MATCH_1})
+
+diff --git a/src/libslic3r/NonplanarSchedule.cpp b/src/libslic3r/NonplanarSchedule.cpp
+index 51cf2535..23c56401 100644
+--- a/src/libslic3r/NonplanarSchedule.cpp
++++ b/src/libslic3r/NonplanarSchedule.cpp
+@@ -10,6 +10,9 @@
+ 
+ #include <boost/log/trivial.hpp>
+ 
++#include <oneapi/tbb/blocked_range.h>
++#include <oneapi/tbb/parallel_for.h>
++
+ #include <algorithm>
+ #include <cmath>
+ #include <cstdio>
+@@ -445,8 +448,6 @@ NonplanarDeferral plan_nonplanar_deferral(const PrintObject &object, const Nonpl
+                 found(r2);
+         });
+     };
+-    // Units already known to follow the unit being collected (by unit index).
+-    std::vector<int> collected_for;
+     // Coarse cells grouped by unit (rebuilt per attempt): the highest material
+     // of a group decides whether its samples can obstruct a toolhead box at all,
+     // and a unit already collected is skipped as a whole.
+@@ -455,7 +456,8 @@ NonplanarDeferral plan_nonplanar_deferral(const PrintObject &object, const Nonpl
+     std::vector<int> cell_samples;
+     // Units under the toolhead boxes at sample t that follow unit u (exact:
+     // blocks() decides per sample; the rings are visited separately).
+-    auto collect_box_dependents = [&](int t, int u, std::vector<int> &out, const std::vector<char> *only = nullptr) {
++    auto collect_box_dependents = [&](int t, int u, std::vector<int> &out, const std::vector<char> *only,
++                                      std::vector<int> &mark) {
+         if (model.boxes.empty())
+             return;
+         const Sample &s0 = all[size_t(t)];
+@@ -473,7 +475,7 @@ NonplanarDeferral plan_nonplanar_deferral(const PrintObject &object, const Nonpl
+                 if (key < 0 || cell_groups[size_t(key)].empty() || coarse_zmax[size_t(key)] <= lowest_floor)
+                     continue;
+                 for (const CellGroup &g : cell_groups[size_t(key)]) {
+-                    if (g.unit == u || collected_for[size_t(g.unit)] == u || g.zmax <= lowest_floor ||
++                    if (g.unit == u || mark[size_t(g.unit)] == u || g.zmax <= lowest_floor ||
+                         (only != nullptr && ! (*only)[size_t(g.unit)]))
+                         continue;
+                     bool covered = false;
+@@ -490,7 +492,7 @@ NonplanarDeferral plan_nonplanar_deferral(const PrintObject &object, const Nonpl
+                         continue;
+                     for (int k = g.begin; k < g.end && all[size_t(cell_samples[size_t(k)])].z > s0.z + block_dz_min; ++ k)
+                         if (cell_samples[size_t(k)] != t && blocks(all[size_t(cell_samples[size_t(k)])], s0)) {
+-                            collected_for[size_t(g.unit)] = u;
++                            mark[size_t(g.unit)] = u;
+                             out.push_back(g.unit);
+                             break;
+                         }
+@@ -622,7 +624,6 @@ NonplanarDeferral plan_nonplanar_deferral(const PrintObject &object, const Nonpl
+             }
+             dependents.assign(size_t(next), {});
+             dependents_known.assign(size_t(next), 0);
+-            collected_for.assign(size_t(next), -1);
+             for (std::vector<CellGroup> &groups : cell_groups)
+                 groups.clear();
+             {
+@@ -678,15 +679,15 @@ NonplanarDeferral plan_nonplanar_deferral(const PrintObject &object, const Nonpl
+         // tool at u's samples, and material resting on them.
+         // Fresh: every unit; pending: only the changed units (the others are
+         // carried over).  Exact: the same existence test as a fresh list.
+-        auto collect_dependents = [&](int u, bool only_changed, std::vector<int> &out) {
++        auto collect_dependents = [&](int u, bool only_changed, std::vector<int> &out, std::vector<int> &mark) {
+             // A unit found once is not tested again for further samples
+-            // (collected_for holds the collecting unit, reset per attempt).
++            // (mark holds the collecting unit, one buffer per collection).
+             for (int t : members[size_t(u)]) {
+                 visit_followers(t,
+-                    [&](int m) { const int v = unit_of[size_t(m)]; return v != u && collected_for[size_t(v)] != u && (! only_changed || changed[size_t(v)]); },
+-                    [&](int m) { const int v = unit_of[size_t(m)]; if (collected_for[size_t(v)] != u) { collected_for[size_t(v)] = u; out.push_back(v); } },
++                    [&](int m) { const int v = unit_of[size_t(m)]; return v != u && mark[size_t(v)] != u && (! only_changed || changed[size_t(v)]); },
++                    [&](int m) { const int v = unit_of[size_t(m)]; if (mark[size_t(v)] != u) { mark[size_t(v)] = u; out.push_back(v); } },
+                     false);
+-                collect_box_dependents(t, u, out, only_changed ? &changed : nullptr);
++                collect_box_dependents(t, u, out, only_changed ? &changed : nullptr, mark);
+             }
+         };
+         auto dependents_of = [&](int u) -> const std::vector<int>& {
+@@ -694,22 +695,23 @@ NonplanarDeferral plan_nonplanar_deferral(const PrintObject &object, const Nonpl
+                 std::vector<int> &list = raw[size_t(u)];
+                 const bool carried = raw_known[size_t(u)];
+                 if (! carried) {
+-                    collect_dependents(u, false, list);
++                    std::vector<int> mark(members.size(), -1);
++                    collect_dependents(u, false, list, mark);
+                     std::sort(list.begin(), list.end());
+                     raw_known[size_t(u)] = 1;
+                 } else if (pending[size_t(u)]) {
++                    // The carried entries count as already collected.
++                    std::vector<int> mark(members.size(), -1);
+                     for (int v : list)
+-                        collected_for[size_t(v)] = u;
+-                    collect_dependents(u, true, list);
++                        mark[size_t(v)] = u;
++                    collect_dependents(u, true, list, mark);
+                     std::sort(list.begin(), list.end());
+                     pending[size_t(u)] = 0;
+                 }
+                 if (carried && verify_dependents) {
+-                    std::vector<int> saved = collected_for, fresh;
+-                    std::fill(collected_for.begin(), collected_for.end(), -1);
+-                    collect_dependents(u, false, fresh);
++                    std::vector<int> fresh, mark(members.size(), -1);
++                    collect_dependents(u, false, fresh, mark);
+                     std::sort(fresh.begin(), fresh.end());
+-                    collected_for = std::move(saved);
+                     if (fresh != list)
+                         throw Slic3r::RuntimeError("Nonplanar deposition order: carried dependents differ from a fresh computation (attempt " +
+                                                    std::to_string(attempt + 1) + ", unit " + std::to_string(u) + ")");
+@@ -809,6 +811,41 @@ NonplanarDeferral plan_nonplanar_deferral(const PrintObject &object, const Nonpl
+             }
+         }
+ 
++        // Compute the dependents of every unit up front: each collection uses its
++        // own marker buffer, so the units are independent and the walk below only
++        // reads the lists.  (On attempts after a refinement the carried lists are
++        // used instead; see dependents_of.)
++        if (attempt == 0) {
++            tbb::parallel_for(tbb::blocked_range<int>(0, int(members.size())), [&](const tbb::blocked_range<int> &range) {
++                std::vector<int> mark(members.size(), -1);
++                for (int u = range.begin(); u < range.end(); ++ u) {
++                    if ((u & 31) == 0)
++                        throw_if_canceled();
++                    std::vector<int> list;
++                    collect_dependents(u, false, list, mark);
++                    std::sort(list.begin(), list.end());
++                    raw[size_t(u)]      = std::move(list);
++                    raw_known[size_t(u)] = 1;
++                    std::fill(mark.begin(), mark.end(), -1);
++                }
++            });
++            // NONPLANAR_PLAN_VERIFY=1: the parallel lists must equal a fresh
++            // sequential computation of the same unit.
++            if (verify_dependents) {
++                size_t bad = 0;
++                for (int u = 0; u < int(members.size()); ++ u) {
++                    std::vector<int> fresh, mark(members.size(), -1);
++                    collect_dependents(u, false, fresh, mark);
++                    std::sort(fresh.begin(), fresh.end());
++                    if (fresh != raw[size_t(u)])
++                        ++ bad;
++                }
++                if (bad != 0)
++                    throw Slic3r::RuntimeError("Nonplanar deposition order: parallel dependents differ from a sequential computation (" +
++                                               std::to_string(bad) + " units)");
++            }
++        }
++
+         std::vector<int> parent(members.size(), -1);
+         std::vector<int> worklist;
+         std::vector<int> cycle;
+diff --git a/src/libslic3r/PrintObject.cpp b/src/libslic3r/PrintObject.cpp
+index e4d9f9e4..86434cfe 100644
+--- a/src/libslic3r/PrintObject.cpp
++++ b/src/libslic3r/PrintObject.cpp
+@@ -2157,6 +2157,9 @@ PrintObject::detect_nonplanar_surfaces()
+         int stable_surface_id = 0;
+         for (auto& nonplanar_surface: this->nonplanar_surfaces()) {
+             nonplanar_surface.stable_id = stable_surface_id++;
++            // The projection is rebuilt from the mesh on every call, so compute it
++            // once per surface instead of once per (shell, home layer, layer).
++            const ExPolygons np_projection = nonplanar_surface.horizontal_projection();
+             float distance_to_top = 0.0f;            
+             for (int shell_thickness = 0; region.config().top_shell_layers > shell_thickness; ++shell_thickness){
+                 //search home layer where the area is projected to
+@@ -2189,14 +2192,14 @@ PrintObject::detect_nonplanar_surfaces()
+                             LayerRegion &upper_layerm = *upper_layer->m_regions[region_id];
+                             Surfaces upper_surfaces = upper_layerm.slices.surfaces;
+                             topNonplanar.append(
+-                                intersection_ex(
+-                                    nonplanar_surface.horizontal_projection(),
+-                                    union_ex(
+-                                        diff_ex(
+-                                            layerm_slices_surfaces, 
+-                                            upper_surfaces, 
+-                                            ApplySafetyOffset::No)), 
+-                                    ApplySafetyOffset::No),
++                                    intersection_ex(
++                                        np_projection,
++                                        union_ex(
++                                            diff_ex(
++                                                layerm_slices_surfaces, 
++                                                upper_surfaces, 
++                                                ApplySafetyOffset::No)), 
++                                        ApplySafetyOffset::No),
+                                 (shell_thickness == 0 ? stTopNonplanar : stInternalSolidNonplanar),
+                                 distance_to_top
+                             );
+@@ -2214,7 +2217,7 @@ PrintObject::detect_nonplanar_surfaces()
+                             if (upper_nonplanar.size() > 0)
+                                 topNonplanar.append(
+                                     intersection_ex(
+-                                        nonplanar_surface.horizontal_projection(),
++                                        np_projection,
+                                         to_expolygons(upper_nonplanar.surfaces),
+                                         ApplySafetyOffset::No),
+                                     (shell_thickness == 0 ? stTopNonplanar : stInternalSolidNonplanar),
+@@ -2224,7 +2227,7 @@ PrintObject::detect_nonplanar_surfaces()
+                         else {
+                             topNonplanar.append(
+                                 intersection_ex(
+-                                    nonplanar_surface.horizontal_projection(),
++                                    np_projection,
+                                     union_ex(to_expolygons(layerm_slices_surfaces)),
+                                     ApplySafetyOffset::No),
+                                 (shell_thickness == 0 ? stTopNonplanar : stInternalSolidNonplanar),
